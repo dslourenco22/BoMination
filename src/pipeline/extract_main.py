@@ -197,11 +197,26 @@ def parse_ollama_response_as_tables(response_text):
     return [df]
 
 
+def _merge_same_schema_tables(tables):
+    """Concatenate tables that share the same column set (multi-page BOMs). (LD)"""
+    if not tables:
+        return []
+    groups = {}
+    for t in tables:
+        key = tuple(t.columns.tolist())
+        groups.setdefault(key, []).append(t)
+    result = []
+    for group in groups.values():
+        merged = pd.concat(group, ignore_index=True) if len(group) > 1 else group[0]
+        result.append(merged)
+    return result
+
+
 def extract_tables_from_pdf(pdf_path, pages='all'):
     """
     Core LLM extraction entry point. (LD)
-    Uses pdfplumber for text + Ollama for structured parsing. (LD)
-    Returns a list of DataFrames (usually one). (LD)
+    Processes each page separately so no page is ever truncated away. (LD)
+    Returns a list of DataFrames (usually one merged table). (LD)
     """
     print(f'\n[LLM] Starting extraction — PDF: {pdf_path}, pages: {pages}')
 
@@ -209,25 +224,46 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
     ocr_generated = False
     try:
         searchable_path, ocr_generated = prepare_searchable_pdf(pdf_path)
-        text = extract_text_from_pdf_pages(searchable_path, pages)
-        print(f'[LLM] Extracted {len(text)} chars of text')
 
-        # Cap text at 24 000 chars — enough for 150+ part BOMs at num_ctx=32768 (LD)
-        if len(text) > 24000:
-            print('[LLM] Text truncated to 24 000 chars to fit model context window')
-            text = text[:24000]
+        try:
+            import pdfplumber
+        except ImportError as e:
+            raise RuntimeError(f'pdfplumber is required for LLM extraction: {e}')
 
-        prompt = EXTRACTION_PROMPT.format(text=text)
-        print('[LLM] Sending prompt to Ollama...')
-        response_text = call_local_ollama(prompt)
-        print(f'[LLM] Response received ({len(response_text)} chars)')
+        with pdfplumber.open(searchable_path) as pdf:
+            page_indexes = _parse_page_range(pages, len(pdf.pages))
+            if not page_indexes:
+                page_indexes = list(range(len(pdf.pages)))
 
-        tables = parse_ollama_response_as_tables(response_text)
-        if not tables:
-            print('[LLM] No tables parsed from Ollama output')
+            all_raw_tables = []
+            for idx in page_indexes:
+                page = pdf.pages[idx]
+                page_text = page.extract_text() or ''
+                if not page_text.strip():
+                    print(f'[LLM] Page {idx + 1}: no text, skipping')
+                    continue
+
+                page_content = f'--- PAGE {idx + 1} ---\n{page_text}'
+                # Per-page cap — leaves room for the prompt wrapper inside num_ctx=32768
+                if len(page_content) > 32000:
+                    print(f'[LLM] Page {idx + 1}: text capped at 32 000 chars')
+                    page_content = page_content[:32000]
+
+                print(f'[LLM] Page {idx + 1}: {len(page_content)} chars — sending to Ollama...')
+                prompt = EXTRACTION_PROMPT.format(text=page_content)
+                response_text = call_local_ollama(prompt)
+                print(f'[LLM] Page {idx + 1}: response {len(response_text)} chars')
+
+                page_tables = parse_ollama_response_as_tables(response_text)
+                all_raw_tables.extend(page_tables)
+
+        if not all_raw_tables:
+            print('[LLM] No tables parsed from any page')
             return []
 
-        cleaned = clean_and_filter_tables(tables, 'Ollama')
+        # Merge pages that belong to the same BOM (same column schema)
+        merged = _merge_same_schema_tables(all_raw_tables)
+        cleaned = clean_and_filter_tables(merged, 'Ollama')
         print(f'[LLM] Returning {len(cleaned)} clean table(s)')
         return cleaned
 

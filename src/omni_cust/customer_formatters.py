@@ -22,6 +22,64 @@ def clean_farrell_columns(df):
     header_keywords = [
         'QTY', 'PART', 'MFG', 'PAF', 'DESCRIPTION', 'DESCRIP', 'COMMENTS', 'ITEM', 'NUMBER', 'INTERNAL', 'MANUFACTURER', 'MPN'
     ]
+
+    # ── Short-circuit: LLM already provided proper column headers ─────────────
+    # Score the COLUMN NAMES (not cell values). If they already look like BOM
+    # headers skip the tabula-style header-row scan, which would incorrectly
+    # use the first DATA row as column names and discard item #1.
+    col_names_upper = [str(c).upper() for c in df.columns]
+    header_score_from_cols = sum(
+        any(kw in c for kw in header_keywords) for c in col_names_upper
+    )
+    if header_score_from_cols >= 2:
+        print(f"🔧 FARRELL DEBUG: Column names already look like BOM headers (score={header_score_from_cols}), skipping header detection")
+        df = df.copy()
+
+        # Rename internal "PART NUMBER" column so it stays distinct from MPN
+        for col in list(df.columns):
+            if "PART NUMBER" in str(col).upper() and "MFG" not in str(col).upper():
+                df.rename(columns={col: "Internal Part Number"}, inplace=True)
+                print(f"🔧 FARRELL DEBUG: Renamed '{col}' to 'Internal Part Number'")
+                break
+
+        # Split combined MFG/PART column into Manufacturer + MPN
+        part_col = None
+        for col in df.columns:
+            col_str = str(col).upper()
+            if ("MFG" in col_str or "MANUF" in col_str) and ("PART" in col_str or "PAF" in col_str):
+                part_col = col
+                break
+        print(f"🔧 FARRELL DEBUG: Found MFG/PART column: {part_col}")
+        if part_col and len(df) > 0:
+            split_cols = df[part_col].astype(str).str.split("/", n=1, expand=True)
+            if split_cols.shape[1] == 2:
+                df.insert(0, "Manufacturer", split_cols[0].str.strip())
+                df.insert(1, "MPN", split_cols[1].str.strip())
+                print("🔧 FARRELL DEBUG: ✅ Split MFG/PART into Manufacturer and MPN")
+                df.drop(columns=[part_col], inplace=True)
+
+        # Normalize QTY to pure numbers
+        qty_col = next(
+            (c for c in df.columns if 'QTY' in str(c).upper() or 'QUANT' in str(c).upper()),
+            None
+        )
+        if qty_col:
+            df[qty_col] = (
+                df[qty_col].astype(str)
+                .str.extract(r'(\d+\.?\d*)')[0]
+                .fillna('')
+            )
+            print(f"🔧 FARRELL DEBUG: Normalized QTY column '{qty_col}'")
+
+        print(f"🔧 FARRELL DEBUG: Final table shape: {df.shape}")
+        print(f"🔧 FARRELL DEBUG: Final columns: {df.columns.tolist()}")
+        if len(df) > 0:
+            print(f"🔧 FARRELL DEBUG: Sample of final data:\n{df.head(2)}")
+        print("🔧 FARRELL DEBUG: ===== END FARRELL PROCESSING (fast path) =====\n")
+        return df
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Legacy path: tabula-style output where headers may be buried in data rows
     best_score = 0
     best_idx = 0
     for idx in range(min(10, len(df))):  # Scan first 10 rows for best header

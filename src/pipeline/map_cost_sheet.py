@@ -352,17 +352,43 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
         }
     else:
         print("📊 Using Farrell format - based on user selection")
-        # Map the actual column names from the Farrell file
+
+        # Pull key columns from the merged (extracted) BOM file into df_oem.
+        # The price-lookup output uses OEMSecrets column names, so MPN and QTY
+        # from the original BOM must be grafted in — exactly like other customers.
+        mpn_candidates = ['MPN', 'Part Number', 'PART NUMBER', 'MODEL NO', 'Model No']
+        for col in mpn_candidates:
+            if col in df_merged.columns:
+                df_oem["MPN"] = df_merged[col]
+                print(f"✅ Added MPN from merged file column '{col}' (Farrell format)")
+                break
+        else:
+            df_oem["MPN"] = ""
+            print("⚠️ MPN column not found in merged file. Skipping part number.")
+
+        qty_candidates = ['QTY', 'Quantity', 'QUANTITY', 'Qty']
+        for col in qty_candidates:
+            if col in df_merged.columns:
+                df_oem["QTY"] = df_merged[col]
+                print(f"✅ Added QTY from merged file column '{col}' (Farrell format)")
+                break
+        else:
+            print("⚠️ QTY column not found in merged file. Will use OEMSecrets quantity.")
+
+        if "ITEM" in df_merged.columns:
+            df_oem["ITEM"] = df_merged["ITEM"]
+            print("✅ Added ITEM column from merged file (Farrell format)")
+
         column_mapping = {
-            "Item": "ITEM",
+            "ITEM": "ITEM",
             "Manufacturer": "MFR",
-            "MPN": "COMMERCIAL PART#",
-            "Quantity": "UNIT QTY",
-            "Quantity for Single BOM": "UNIT QTY",  # From OEMsecrets output
+            "MPN": "COMMERCIAL PART#",          # pulled from merged above
+            "QTY": "UNIT QTY",                  # pulled from merged above
+            "Quantity for Single BOM": "UNIT QTY",  # OEMSecrets fallback
             "Unit Price in USD": "COST EACH",
-            "Unit Price": "COST EACH",  # Alternative price column name
-            "Price": "COST EACH",  # Alternative price column name
-            "Cost": "COST EACH",  # Alternative price column name
+            "Unit Price": "COST EACH",
+            "Price": "COST EACH",
+            "Cost": "COST EACH",
             "Lead Time on Additional Stock in Weeks": "LEAD TIME (WEEKS)",
             "Notes": "SUPPLIER / NOTES",
             "DESCRIPTION": "DESCRIPTION"
