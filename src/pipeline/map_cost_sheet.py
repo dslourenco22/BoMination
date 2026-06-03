@@ -471,6 +471,23 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
 
     print(f"✅ Inserted {len(df_out)} rows of data into cost sheet")
 
+    # ── EXT COST formula: = UNIT QTY * COST EACH for every data row (LD)
+    from openpyxl.utils import get_column_letter
+
+    _needed = ('UNIT QTY', 'COST EACH', 'EXT COST')
+    if all(k in excel_headers for k in _needed):
+        uq_letter  = get_column_letter(excel_headers['UNIT QTY'])
+        ce_letter  = get_column_letter(excel_headers['COST EACH'])
+        ec_col_idx = excel_headers['EXT COST']
+        for row_offset in range(len(df_out)):
+            data_row = header_row + 1 + row_offset
+            ws.cell(row=data_row, column=ec_col_idx,
+                    value=f'={uq_letter}{data_row}*{ce_letter}{data_row}')
+        print(f"[FORMULA] EXT COST formula written for {len(df_out)} rows")
+    else:
+        missing = [k for k in _needed if k not in excel_headers]
+        print(f"[FORMULA] Skipping EXT COST — columns not found in template: {missing}")
+
     # Save to PDF directory instead of using output_directory parameter
     # Get the original PDF path from the oem_path (which is based on the merged file)
     oem_path_obj = Path(oem_path)

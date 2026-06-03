@@ -1,327 +1,271 @@
-import pandas as pd
-import time
+"""
+LLM-powered price lookup using DuckDuckGo search + Ollama. (LD)
+Replaces the legacy Selenium / ChromeDriver / OEMSecrets scraper. (LD)
+
+Output DataFrame matches the OEMSecrets column schema so map_cost_sheet.py (LD)
+works without any changes. (LD)
+"""
+
 import os
-import shutil
-import sys
+import json
+import time
 import traceback
 from pathlib import Path
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import WebDriverException, TimeoutException, NoSuchElementException
-from pipeline.validation_utils import handle_common_errors, check_chromedriver_availability, generate_output_path
-import logging
 
-# Suppress verbose Selenium logging
-logging.getLogger('selenium').setLevel(logging.WARNING)
-logging.getLogger('urllib3').setLevel(logging.WARNING)
-logging.getLogger('requests').setLevel(logging.WARNING)
-logging.getLogger('selenium.webdriver.remote.remote_connection').setLevel(logging.WARNING)
+import pandas as pd
 
-# Support both script and PyInstaller .exe paths for ChromeDriver
-def find_chromedriver_path():
-    """Find ChromeDriver in various possible locations."""
-    if getattr(sys, 'frozen', False):
-        # PyInstaller paths - check multiple locations
-        possible_paths = [
-            Path(sys._MEIPASS) / "chromedriver.exe",  # Root of extracted files
-            Path(sys._MEIPASS) / "src" / "chromedriver.exe",  # src subdirectory
-            Path(sys.executable).parent / "chromedriver.exe",  # Next to .exe
-        ]
-    else:
-        # Development paths
-        possible_paths = [
-            Path(__file__).parent / "chromedriver.exe",  # Same directory as script
-            Path(__file__).parent.parent / "chromedriver.exe",  # Parent directory (src/)
-        ]
-    
-    print("🔍 Searching for ChromeDriver in the following locations:")
-    for path in possible_paths:
-        exists = path.exists()
-        print(f"  {path} -> {'✓ Found' if exists else '✗ Not found'}")
-        if exists:
-            return str(path)
-    
-    # If not found, return the most likely path for error reporting
-    return str(possible_paths[0]) if possible_paths else "chromedriver.exe"
+# ── Config ─────────────────────────────────────────────────────────────────── (LD)
+MODEL = os.environ.get('BOM_LLM_MODEL', 'llama3.2')
+OLLAMA_HOST = os.environ.get('BOM_LLM_ENDPOINT', 'http://127.0.0.1:11434')
+SEARCH_DELAY = 1.0  # Seconds between DDG requests — be polite (LD)
 
-CHROMEDRIVER_PATH = find_chromedriver_path()
+# Column names that OEMSecrets used to export; map_cost_sheet.py reads these (LD)
+OEM_COLUMNS = [
+    'Internal Reference',
+    'Part Number',
+    'Quantity for Single BOM',
+    'Extended Quantity for 1 BOM',
+    'Manufacturer',
+    'Distributor',
+    'Minimum Order',
+    'Unit Price in USD',
+    'Lead Time on Additional Stock in Weeks',
+    'Notes',
+]
 
-def setup_browser():
-    """Setup Chrome browser with error handling."""
+# ── Prompt ─────────────────────────────────────────────────────────────────── (LD)
+PRICE_PROMPT = """You are an electronics component pricing specialist.
+
+Extract pricing information for this part from the web search results below.
+
+Part number: {part_number}
+Quantity needed: {qty}
+
+Search results:
+{results}
+
+Return ONLY this JSON — no explanation:
+{{
+  "unit_price": "12.50",
+  "manufacturer": "Manufacturer Name",
+  "distributor": "Distributor Name",
+  "min_order": "1",
+  "lead_time_weeks": "2-4",
+  "notes": ""
+}}
+
+Rules:
+- unit_price: numeric string (e.g. "3.75") — the lowest price found for the quantity
+- All other fields: plain string — use "N/A" when not found
+- Do NOT include currency symbols in unit_price
+"""
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────── (LD)
+
+def _find_part_number_col(df):
+    """Return the column name that most likely holds MPNs, or None. (LD)"""
+    candidates = ['MPN', 'PART NO', 'PART NUMBER', 'PART#', 'P/N', 'PN',
+                  'MODEL NO', 'MODEL', 'Part Number', 'Part number']
+    for name in candidates:
+        if name in df.columns:
+            return name
+    # Case-insensitive fallback (LD)
+    for col in df.columns:
+        if any(kw in col.upper() for kw in ['MPN', 'PART', 'MODEL']):
+            return col
+    return None
+
+
+def _find_qty_col(df):
+    """Return the column name that holds quantities, or None. (LD)"""
+    candidates = ['QTY', 'QUANTITY', 'QUANT.', 'AMOUNT', 'Quantity', 'Qty']
+    for name in candidates:
+        if name in df.columns:
+            return name
+    for col in df.columns:
+        if 'QTY' in col.upper() or 'QUANT' in col.upper():
+            return col
+    return None
+
+
+def _search_ddg(part_number):
+    """Search DuckDuckGo for the part number and return formatted result text. (LD)"""
     try:
-        # Debug: Print ChromeDriver path being used
-        print(f"🔍 Using ChromeDriver at: {CHROMEDRIVER_PATH}")
-        print(f"🔍 ChromeDriver exists: {os.path.exists(CHROMEDRIVER_PATH)}")
-        
-        if getattr(sys, 'frozen', False):
-            print(f"🔍 Running in PyInstaller mode")
-            print(f"🔍 sys._MEIPASS: {sys._MEIPASS}")
-            print(f"🔍 sys.executable: {sys.executable}")
-        else:
-            print(f"🔍 Running in development mode")
-            print(f"🔍 Script directory: {Path(__file__).parent}")
-        
-        # Check ChromeDriver availability first
-        chrome_available, chrome_version, chrome_error = check_chromedriver_availability()
-        if not chrome_available:
-            raise Exception(f"ChromeDriver setup failed: {chrome_error}")
-        
-        print(f"Using ChromeDriver: {chrome_version}")
-        
-        options = webdriver.ChromeOptions()
-        # Start with minimal options for better compatibility
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-extensions")
-        
-        # Reduce Chrome logging output
-        options.add_argument("--log-level=3")
-        options.add_argument("--silent")
-        
-        # Only add headless mode if specified (comment out for visible browser)
-        # options.add_argument("--headless")
-        
-        # Create service with ChromeDriver path
-        service = Service(CHROMEDRIVER_PATH)
-        
-        print("Starting Chrome browser...")
-        print(f"ChromeDriver path: {CHROMEDRIVER_PATH}")
-        driver = webdriver.Chrome(service=service, options=options)
-        print("✅ Browser started successfully")
-        
-        # Set a reasonable page load timeout
-        driver.set_page_load_timeout(30)
-        
-        return driver
-        
-    except WebDriverException as e:
-        error_msg = handle_common_errors(str(e), WebDriverException)
-        print(error_msg)
-        raise Exception(error_msg)
-    except Exception as e:
-        error_msg = handle_common_errors(str(e))
-        print(error_msg)
-        raise
-
-def upload_file_to_bomtool(driver, file_path):
-    """Upload file to BoM tool with enhanced error handling."""
-    try:
-        print("🌐 Navigating to oemsecrets.com...")
-        driver.get("https://www.oemsecrets.com")
-
-        # Step 1: Go to BoM Tool
-        print("🔗 Looking for BoM Tool link...")
-        bom_button = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.LINK_TEXT, "BoM Tool"))
-        )
-        bom_button.click()
-        print("✅ Clicked BoM Tool link")
-
-        # Step 2: Upload File
-        print("📤 Uploading file...")
-        file_input = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input.filepond--browser"))
-        )
-        print(f"📄 Uploading: {file_path}")
-        file_input.send_keys(file_path)
-
-        # Step 3: Click "Import File"
-        print("⏳ Clicking Import File button...")
-        import_button = WebDriverWait(driver, 20).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "button.submit-selection"))
-        )
-        import_button.click()
-        print("✅ File import initiated")
-
-        # Step 4: Wait for processing to complete (with increased timeout)
-        print("⏳ Waiting for file processing...")
-        try:
-            WebDriverWait(driver, 60).until(
-                EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Export') and contains(@class, 'dropdown-toggle')]"))
+        from duckduckgo_search import DDGS
+        query = f'"{part_number}" buy price USD electronics component distributor'
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+        if not results:
+            return None
+        lines = []
+        for r in results:
+            lines.append(
+                f"Title: {r.get('title', '')}\n"
+                f"URL: {r.get('href', '')}\n"
+                f"Snippet: {r.get('body', '')}"
             )
-            print("✅ Export dropdown is now visible - processing complete")
-        except TimeoutException:
-            print("⚠️ Export dropdown not visible after 60 seconds - checking if processing is still ongoing...")
-            # Sometimes the processing takes longer, let's give it more time
-            time.sleep(10)
-            try:
-                export_dropdown = driver.find_element(By.XPATH, "//a[contains(text(), 'Export') and contains(@class, 'dropdown-toggle')]")
-                if export_dropdown.is_displayed():
-                    print("✅ Export dropdown found after additional wait")
-                else:
-                    raise Exception("Export dropdown not found - file processing may have failed")
-            except:
-                raise Exception("File processing appears to have failed - export option not available")
-        
-        # ⏳ Wait for pricing data to load dynamically based on number of parts
-        # Count the number of parts in the input file to determine wait time
-        try:
-            df = pd.read_excel(file_path, keep_default_na=False, na_values=[''])
-            part_count = len(df)
-            # Wait 1.3 seconds per part, with minimum 5 seconds and maximum 240 seconds
-            wait_time = max(5, min(240, int(part_count * 1.3)))
-            print(f"⏳ Found {part_count} parts in BOM - waiting {wait_time} seconds for pricing data to load...")
-            time.sleep(wait_time)
-        except Exception as e:
-            # Fallback to 15 seconds if we can't read the file for some reason
-            print(f"⚠️ Could not count parts ({e}), using default 15 second wait...")
-            time.sleep(15)
-
-        # Step 5: Click Export dropdown using JS (to ensure it actually opens)
-        print("📥 Opening export dropdown...")
-        export_dropdown = WebDriverWait(driver, 40).until(
-            EC.presence_of_element_located((By.XPATH, "//a[contains(text(), 'Export') and contains(@class, 'dropdown-toggle')]"))
-        )
-        driver.execute_script("arguments[0].click();", export_dropdown)
-        time.sleep(2)  # give time for dropdown to expand
-
-        # Step 6: Wait for and select ".xlsx" radio option
-        print("📊 Selecting XLSX format...")
-        xlsx_radio = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='radio'][value='xlsx']"))
-        )
-        driver.execute_script("arguments[0].click();", xlsx_radio)  # JS click to handle visibility issues
-
-        # Step 7: Click Download button
-        print("⬇️ Starting download...")
-        download_button = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-tertiary"))
-        )
-        download_button.click()
-
-        print("⏳ Waiting for file to download...")
-
-        # Step 8: Wait for download and move it
-        download_dir = os.path.join(os.path.expanduser("~"), "Downloads")
-        timeout = 30
-        filename = None
-        
-        for i in range(timeout):
-            for file in os.listdir(download_dir):
-                if file.endswith(".xlsx") and "bom" in file.lower():
-                    filename = file
-                    break
-            if filename:
-                break
-            if i % 5 == 0:  # Print progress every 5 seconds
-                print(f"⏳ Still waiting for download... ({i}/{timeout} seconds)")
-            time.sleep(1)
-
-        if not filename:
-            raise Exception("Download failed or timed out after 30 seconds. "
-                          "Please check your internet connection and try again.")
-
-        src_path = os.path.join(download_dir, filename)
-        
-        # Save to the same directory as the input file (PDF directory)
-        input_path_obj = Path(file_path)
-        # Remove "_merged" suffix from stem to avoid double naming
-        base_name = input_path_obj.stem.replace("_merged", "")
-        dest_path = input_path_obj.parent / f"{base_name}_merged_with_prices.xlsx"
-        
-        print(f"📁 Moving price data to: {dest_path}")
-        shutil.move(src_path, dest_path)
-
-        print(f"✅ Price data saved to: {dest_path}")
-        return dest_path
-        
-    except TimeoutException as e:
-        error_msg = (
-            "⏰ Timeout Error: The web page took too long to respond.\n\n"
-            "Possible causes:\n"
-            "• Slow internet connection\n"
-            "• Server is busy or temporarily unavailable\n"
-            "• Large file taking longer to process\n\n"
-            "Solutions:\n"
-            "• Check your internet connection\n"
-            "• Try again in a few minutes\n"
-            "• Use a smaller file if possible"
-        )
-        print(error_msg)
-        raise Exception(error_msg)
-        
-    except NoSuchElementException as e:
-        error_msg = (
-            "🔍 Element Not Found: Could not find expected element on the webpage.\n\n"
-            "Possible causes:\n"
-            "• Website layout has changed\n"
-            "• Page didn't load properly\n"
-            "• Browser compatibility issue\n\n"
-            "Solutions:\n"
-            "• Try refreshing and running again\n"
-            "• Check if the website is accessible in your browser\n"
-            "• Update ChromeDriver if necessary"
-        )
-        print(error_msg)
-        raise Exception(error_msg)
-        
+        return '\n\n'.join(lines)
     except Exception as e:
-        error_msg = handle_common_errors(str(e))
-        print(error_msg)
-        raise
+        print(f'  [DDG] Search failed for {part_number}: {e}')
+        return None
+
+
+def _parse_price_with_ollama(part_number, qty, search_text):
+    """
+    Send search results to Ollama and parse the price JSON response. (LD)
+    Returns a dict with keys matching OEM_COLUMNS. (LD)
+    """
+    empty = {
+        'unit_price': 'N/A',
+        'manufacturer': 'N/A',
+        'distributor': 'N/A',
+        'min_order': 'N/A',
+        'lead_time_weeks': 'N/A',
+        'notes': '',
+    }
+    try:
+        import ollama
+        prompt = PRICE_PROMPT.format(
+            part_number=part_number,
+            qty=qty,
+            results=search_text[:3000],  # Limit context per lookup (LD)
+        )
+        client = ollama.Client(host=OLLAMA_HOST)
+        response = client.chat(
+            model=MODEL,
+            messages=[{'role': 'user', 'content': prompt}],
+            format='json',
+            options={'temperature': 0, 'num_ctx': 4096},
+        )
+        data = json.loads(response['message']['content'])
+        return {
+            'unit_price':       str(data.get('unit_price', 'N/A')),
+            'manufacturer':     str(data.get('manufacturer', 'N/A')),
+            'distributor':      str(data.get('distributor', 'N/A')),
+            'min_order':        str(data.get('min_order', 'N/A')),
+            'lead_time_weeks':  str(data.get('lead_time_weeks', 'N/A')),
+            'notes':            str(data.get('notes', '')),
+        }
+    except Exception as e:
+        print(f'  [PRICE] Ollama parse failed: {e}')
+        return empty
+
+
+def lookup_prices_for_bom(df):
+    """
+    Main price-lookup loop. (LD)
+    For every row in the BOM DataFrame, queries DDG + Ollama and appends (LD)
+    pricing columns. Returns a new DataFrame with OEMSecrets-compatible columns. (LD)
+    """
+    pn_col = _find_part_number_col(df)
+    qty_col = _find_qty_col(df)
+
+    if pn_col is None:
+        print('[PRICE] No part-number column found — skipping price lookup')
+        return _build_empty_output(df)
+
+    print(f'[PRICE] Looking up prices for {len(df)} parts '
+          f'(part col: {pn_col}, qty col: {qty_col or "none"})')
+
+    rows_out = []
+    for idx, row in df.iterrows():
+        pn = str(row[pn_col]).strip()
+        qty = str(row[qty_col]).strip() if qty_col else '1'
+
+        # Build the output row with OEMSecrets column names (LD)
+        out_row = {
+            'Internal Reference':               '',
+            'Part Number':                       pn,
+            'Quantity for Single BOM':           qty,
+            'Extended Quantity for 1 BOM':       qty,
+            'Manufacturer':                      'N/A',
+            'Distributor':                       'N/A',
+            'Minimum Order':                     'N/A',
+            'Unit Price in USD':                 0.0,
+            'Lead Time on Additional Stock in Weeks': 'N/A',
+            'Notes':                             '',
+        }
+
+        # Skip blank / placeholder part numbers (LD)
+        if not pn or pn.lower() in ('n/a', 'nan', 'none', ''):
+            rows_out.append(out_row)
+            continue
+
+        print(f'  [{idx + 1}/{len(df)}] Searching: {pn}')
+        search_text = _search_ddg(pn)
+
+        if search_text:
+            price_data = _parse_price_with_ollama(pn, qty, search_text)
+            out_row['Manufacturer'] = price_data['manufacturer']
+            out_row['Distributor'] = price_data['distributor']
+            out_row['Minimum Order'] = price_data['min_order']
+            out_row['Lead Time on Additional Stock in Weeks'] = price_data['lead_time_weeks']
+            out_row['Notes'] = price_data['notes']
+            try:
+                out_row['Unit Price in USD'] = float(price_data['unit_price'])
+            except ValueError:
+                out_row['Unit Price in USD'] = 0.0
+        else:
+            print(f'  [SKIP] No search results for {pn}')
+
+        rows_out.append(out_row)
+        time.sleep(SEARCH_DELAY)
+
+    result_df = pd.DataFrame(rows_out, columns=OEM_COLUMNS)
+    print(f'[PRICE] Price lookup complete — {len(result_df)} rows')
+    return result_df
+
+
+def _build_empty_output(df):
+    """Return a zero-price DataFrame with OEMSecrets columns when lookup is skipped. (LD)"""
+    n = len(df)
+    return pd.DataFrame({
+        'Internal Reference':               [''] * n,
+        'Part Number':                       [''] * n,
+        'Quantity for Single BOM':           ['1'] * n,
+        'Extended Quantity for 1 BOM':       ['1'] * n,
+        'Manufacturer':                      ['N/A'] * n,
+        'Distributor':                       ['N/A'] * n,
+        'Minimum Order':                     ['N/A'] * n,
+        'Unit Price in USD':                 [0.0] * n,
+        'Lead Time on Additional Stock in Weeks': ['N/A'] * n,
+        'Notes':                             [''] * n,
+    })
+
 
 def main():
-    """Main function with comprehensive error handling."""
-    input_path = os.environ.get("BOM_EXCEL_PATH")
-    
+    """Entry point called by main_pipeline.py. (LD)"""
+    input_path = os.environ.get('BOM_EXCEL_PATH')
+
     if not input_path:
-        print("❌ Error: BOM_EXCEL_PATH environment variable not set")
+        print('[PRICE] BOM_EXCEL_PATH not set')
         return
-    
-    if not os.path.exists(input_path):
-        print(f"❌ Error: Input file does not exist: {input_path}")
+
+    if not Path(input_path).exists():
+        print(f'[PRICE] Input file not found: {input_path}')
         return
-    
-    print(f"📄 Processing file: {input_path}")
-    
-    driver = None
+
+    print(f'[PRICE] Loading BOM from: {input_path}')
     try:
-        driver = setup_browser()
-        print("🔍 Starting price lookup process...")
-        
-        output_path = upload_file_to_bomtool(driver, os.path.abspath(input_path))
-        
-        if output_path:
-            print(f"\n✅ Price lookup completed successfully!")
-            print(f"📄 Output saved to: {output_path}")
-        else:
-            print("\n❌ Price lookup failed - no output file generated")
-            
-    except WebDriverException as e:
-        error_msg = handle_common_errors(str(e), WebDriverException)
-        print(f"\n❌ Browser automation error:\n{error_msg}")
-    except TimeoutException as e:
-        print(f"\n❌ Timeout error: The operation took too long to complete.\n"
-              f"This might be due to slow internet connection or server issues.\n"
-              f"Original error: {str(e)}")
+        df = pd.read_excel(input_path, keep_default_na=False, na_values=[''])
     except Exception as e:
-        print(f"❌ Error in price lookup: {e}")
-        print(f"Traceback: {traceback.format_exc()}")
-        
-        # More detailed error information for common issues
-        error_str = str(e).lower()
-        if "certificate" in error_str or "ssl" in error_str or "connection is not private" in error_str:
-            raise Exception(f"SSL/Certificate Error: The website has certificate issues that prevent automated access. "
-                          f"This may require manual intervention or website policy changes. Original error: {e}")
-        elif "timeout" in error_str:
-            raise Exception(f"Network Timeout: The website is not responding. Check your internet connection or try again later. Original error: {e}")
-        elif "webdriver" in error_str or "chromedriver" in error_str:
-            raise Exception(f"Browser Driver Error: Problem with Chrome/ChromeDriver setup. Original error: {e}")
-        else:
-            raise Exception(f"Price Lookup Failed: {e}")
-    
-    finally:
-        if driver:
-            try:
-                driver.quit()
-                print("🔒 Browser closed successfully")
-            except Exception as e:
-                print(f"⚠️ Warning: Error closing browser: {str(e)}")
+        print(f'[PRICE] Failed to read input file: {e}')
+        return
 
+    print(f'[PRICE] Loaded {len(df)} rows, columns: {df.columns.tolist()}')
 
-if __name__ == "__main__":
-    main()
+    try:
+        df_priced = lookup_prices_for_bom(df)
+    except Exception as e:
+        print(f'[PRICE] Price lookup failed: {e}')
+        traceback.print_exc()
+        df_priced = _build_empty_output(df)
+
+    # Save with the same filename convention OEMSecrets used (LD)
+    input_path_obj = Path(input_path)
+    base = input_path_obj.stem.replace('_merged', '')
+    output_path = input_path_obj.parent / f'{base}_merged_with_prices.xlsx'
+
+    df_priced.to_excel(output_path, index=False)
+    print(f'[PRICE] Saved: {output_path}')

@@ -771,7 +771,7 @@ Invalid formats:
         def background_task():
             try:
                 # Start progress indication
-                self.start_progress("Initializing pipeline...")
+                self.start_progress("Initializing LLM extraction pipeline...")
                 
                 # Create detailed error log for debugging
                 error_log_path = Path(pdf).parent / "bomination_error_log.txt"
@@ -784,226 +784,76 @@ Invalid formats:
                         with open(error_log_path, "a", encoding="utf-8") as f:
                             f.write(log_entry + "\n")
                     except:
-                        pass  # Don't let logging errors crash the app
+                        pass
                     print(log_entry)
                 
-                log_to_file("=== BoMination Pipeline Started ===")
+                log_to_file("=== BoMination LLM Pipeline Started ===")
                 log_to_file(f"PDF: {pdf}")
                 log_to_file(f"Pages: {pages}")
                 log_to_file(f"Company: {company}")
-                log_to_file(f"Output Directory: {output_dir}")
-                log_to_file(f"Use ROI: {self.use_roi.get()}")
                 
-                self.add_log_message("Launching main pipeline process...", "step")
+                self.add_log_message("Starting LLM-based table extraction...", "step")
+                log_to_file("Starting LLM-based table extraction...")
                 
-                # Update progress for different stages
-                self.start_progress("Processing PDF and extracting tables...")
+                # Step 1: LLM-based table extraction (LD)
+                self.start_progress("Extracting tables using local LLM engine...")
                 
-                # Enhanced logging for OCR debugging
-                self.add_log_message("Starting PDF table extraction...", "step")
-                log_to_file("Starting PDF table extraction...")
-                
-                # Perform comprehensive system checks with detailed logging
-                log_to_file("=== System Requirements Check ===")
-                
-                # Check Java
-                java_installed, java_version, java_error = check_java_installation()
-                if not java_installed:
-                    error_msg = f"Java not found: {java_error}"
-                    log_to_file(f"CRITICAL: {error_msg}")
-                    self.add_log_message(error_msg, "error")
-                    raise Exception(f"System Requirements Error: Java is required for PDF extraction. {java_error}")
-                else:
-                    log_to_file(f"Java OK: {java_version}")
-                    self.add_log_message(f"Java detected: {java_version}", "success")
-                
-                # Check ChromeDriver (for price lookup)
-                chrome_available, chrome_version, chrome_error = check_chromedriver_availability()
-                if not chrome_available:
-                    log_to_file(f"WARNING: ChromeDriver not available: {chrome_error}")
-                    self.add_log_message("ChromeDriver not available - price lookup may fail", "warning")
-                else:
-                    log_to_file(f"ChromeDriver OK: {chrome_version}")
-                    self.add_log_message(f"ChromeDriver detected: {chrome_version}", "success")
-                
-                # Check OCR availability and log status
-                # Enhanced logging for OCR debugging
-                self.add_log_message("Starting PDF table extraction...", "step")
-                log_to_file("Starting PDF table extraction...")
-                
-                # Perform comprehensive system checks with detailed logging
-                log_to_file("=== System Requirements Check ===")
-                
-                # Check Java
-                java_installed, java_version, java_error = check_java_installation()
-                if not java_installed:
-                    error_msg = f"Java not found: {java_error}"
-                    log_to_file(f"CRITICAL: {error_msg}")
-                    self.add_log_message(error_msg, "error")
-                    raise Exception(f"System Requirements Error: Java is required for PDF extraction. {java_error}")
-                else:
-                    log_to_file(f"Java OK: {java_version}")
-                    self.add_log_message(f"Java detected: {java_version}", "success")
-                
-                # Check ChromeDriver (for price lookup)
-                chrome_available, chrome_version, chrome_error = check_chromedriver_availability()
-                if not chrome_available:
-                    log_to_file(f"WARNING: ChromeDriver not available: {chrome_error}")
-                    self.add_log_message("ChromeDriver not available - price lookup may fail", "warning")
-                else:
-                    log_to_file(f"ChromeDriver OK: {chrome_version}")
-                    self.add_log_message(f"ChromeDriver detected: {chrome_version}", "success")
-                
-                # Check OCR availability and log status
-                log_to_file("=== OCR Components Check ===")
                 try:
-                    from pipeline.ocr_preprocessor import check_ocrmypdf_installation, check_tesseract_installation
-                    
-                    ocr_available, ocr_version, ocr_error = check_ocrmypdf_installation()
-                    tesseract_available, tesseract_version, tesseract_error = check_tesseract_installation()
-                    
-                    if ocr_available and tesseract_available:
-                        log_to_file(f"OCR OK: {ocr_version}, Tesseract: {tesseract_version}")
-                        self.add_log_message(f"OCR available: {ocr_version}, Tesseract: {tesseract_version}", "success")
-                    else:
-                        log_to_file(f"OCR PARTIAL: OCR={ocr_available}, Tesseract={tesseract_available}")
-                        self.add_log_message("OCR not fully available - some PDFs may fail", "warning")
-                        if not ocr_available:
-                            log_to_file(f"OCRmyPDF issue: {ocr_error}")
-                            self.add_log_message(f"OCRmyPDF issue: {ocr_error}", "warning")
-                        if not tesseract_available:
-                            log_to_file(f"Tesseract issue: {tesseract_error}")
-                            self.add_log_message(f"Tesseract issue: {tesseract_error}", "warning")
-                            
-                except Exception as ocr_check_error:
-                    log_to_file(f"OCR check failed: {ocr_check_error}")
-                    self.add_log_message(f"Could not check OCR status: {ocr_check_error}", "warning")
-                
-                log_to_file("=== Starting Pipeline Execution ===")
-                
-                # Check Camelot availability for ROI fallback
-                try:
-                    import camelot
-                    log_to_file("Camelot available for ROI fallback")
-                    self.add_log_message("Camelot available for ROI fallback", "success")
-                except ImportError:
-                    log_to_file("Camelot not available - install with: pip install camelot-py[cv]")
-                    self.add_log_message("Camelot not available - install with: pip install camelot-py[cv]", "warning")
-                except Exception as camelot_error:
-                    log_to_file(f"Camelot error: {camelot_error}")
-                    self.add_log_message(f"Camelot error: {camelot_error}", "warning")
-                
-                # Call the pipeline with GUI review callback and comprehensive error handling
-                log_to_file("Calling pipeline with GUI review...")
-                self.add_log_message("Calling main pipeline with review capability...", "step")
-                
-                # Call the pipeline with GUI review callback and comprehensive error handling
-                log_to_file("Calling pipeline with GUI review...")
-                self.add_log_message("Calling main pipeline with review capability...", "step")
-                
-                # Import the pipeline function
-                try:
-                    from pipeline.main_pipeline import run_main_pipeline_with_gui_review
-                    log_to_file("Pipeline module imported successfully")
+                    from pipeline.main_pipeline import run_extract_bom_with_llm
+                    log_to_file("LLM extraction module imported successfully")
                 except Exception as import_error:
-                    error_msg = f"Failed to import pipeline module: {import_error}"
+                    error_msg = f"Failed to import LLM extraction module: {import_error}"
                     log_to_file(f"CRITICAL: {error_msg}")
                     self.add_log_message(error_msg, "error")
                     raise Exception(f"Import Error: {error_msg}")
                 
-                # Create a callback that will be called when review is needed
-                def review_callback(merged_df):
-                    log_to_file("Review callback triggered from pipeline")
-                    print("GUI REVIEW: Review callback called from pipeline")
-                    print(f"GUI REVIEW: Merged DataFrame shape: {merged_df.shape}")
-                    print(f"GUI REVIEW: Merged DataFrame columns: {merged_df.columns.tolist()}")
-                    self.add_log_message("Review callback triggered - showing review window", "step")
-                    
-                    # This will be called from the background thread, so we need to
-                    # schedule the review window creation on the main thread
-                    result_container = [None]
-                    review_event = threading.Event()
-                    review_error = [None]
-                    
-                    def show_review_on_main_thread():
-                        try:
-                            print("📝 GUI REVIEW: Creating review window on main thread")
-                            self.add_log_message("Opening review window for table editing", "info")
-                            
-                            # Update progress to show we're waiting for user input
-                            self.update_status("⏳ Waiting for user to review and confirm table...")
-                            
-                            # Show the review window and wait for user input
-                            reviewed_df = show_review_window(merged_df, self.root)
-                            
-                            if reviewed_df is not None:
-                                result_container[0] = reviewed_df
-                                print(f"GUI REVIEW: Review window completed, result shape: {reviewed_df.shape}")
-                                self.add_log_message("Review window completed - user confirmed table", "success")
-                                self.add_log_message("Proceeding to price lookup...", "step")
-                            else:
-                                print("GUI REVIEW: Review window cancelled or returned None")
-                                self.add_log_message("Review window cancelled", "warning")
-                                result_container[0] = merged_df  # Use original if cancelled
-                                
-                        except Exception as e:
-                            print(f"GUI REVIEW: Error in review window: {e}")
-                            self.add_log_message(f"Review window error: {e}", "error")
-                            result_container[0] = merged_df  # Use original on error
-                            review_error[0] = e
-                        finally:
-                            # Signal that review is complete
-                            review_event.set()
-                    
-                    # Schedule the review window on the main thread
-                    print("GUI REVIEW: Scheduling review window on main thread")
-                    try:
-                        self.root.after(0, show_review_on_main_thread)
-                    except RuntimeError as e:
-                        print(f"GUI REVIEW: Could not schedule review window: {e}")
-                        # Try direct call as fallback
-                        try:
-                            show_review_on_main_thread()
-                        except Exception as direct_error:
-                            print(f"GUI REVIEW: Direct call also failed: {direct_error}")
-                            result_container[0] = merged_df
-                            review_event.set()
-                            return result_container[0]
-                    
-                    # Wait for the review to complete using threading event
-                    print("GUI REVIEW: Waiting for review to complete...")
-                    review_event.wait()
-                    
-                    # Give the GUI a moment to update after the review window closes
-                    self.root.update_idletasks()
-                    
-                    # Check if there was an error
-                    if review_error[0]:
-                        print(f"GUI REVIEW: Review completed with error: {review_error[0]}")
-                        self.add_log_message(f"Review completed with error: {review_error[0]}", "error")
-                    else:
-                        safe_print("[DEBUG] GUI REVIEW: Review completed successfully")
-                        self.add_log_message("Review completed - continuing with price lookup", "info")
-                    
-                    return result_container[0]
+                # Execute LLM extraction (LD)
+                self.add_log_message("Triggering local LLM semantic parsing engine...", "step")
+                log_to_file("Executing LLM table extraction...")
                 
-                # Run the pipeline with the review callback
-                result = run_main_pipeline_with_gui_review(
-                    pdf_path=self.pdf_path.get(),
+                merged_path = run_extract_bom_with_llm(
+                    pdf_path=pdf,
                     pages=pages,
-                    company=company,
-                    output_directory=self.output_directory.get(),
-                    review_callback=review_callback,
-                    tabula_mode=self.tabula_mode.get()
+                    company=company
                 )
                 
-                # Log the result if it contains useful information
-                if result:
-                    log_to_file(f"Pipeline result: {result}")
-                    self.add_log_message(f"Pipeline result: {result}", "info")
+                log_to_file(f"LLM extraction completed: {merged_path}")
+                self.add_log_message("LLM extraction completed successfully!", "success")
                 
-                log_to_file("Pipeline process completed successfully!")
-                self.add_log_message("Pipeline process completed successfully!", "success")
+                # Step 2: Price lookup (LD)
+                self.start_progress("Running price lookup...")
+                self.add_log_message("Step 2: Looking up supplier prices...", "step")
+                log_to_file("Starting price lookup...")
+                
+                try:
+                    from pipeline.lookup_price import main as lookup_main
+                    os.environ["BOM_EXCEL_PATH"] = str(merged_path)
+                    lookup_main()
+                    log_to_file("Price lookup completed")
+                    self.add_log_message("Price lookup completed", "success")
+                except Exception as lookup_error:
+                    log_to_file(f"Price lookup failed: {lookup_error}")
+                    self.add_log_message(f"Price lookup failed (continuing anyway): {lookup_error}", "warning")
+                
+                # Step 3: Cost sheet mapping (LD)
+                self.start_progress("Mapping to cost sheet template...")
+                self.add_log_message("Step 3: Mapping to OMNI cost sheet template...", "step")
+                log_to_file("Starting cost sheet mapping...")
+                
+                try:
+                    from pipeline.map_cost_sheet import main as map_main
+                    os.environ["OEM_INPUT_PATH"] = str(merged_path)
+                    os.environ["MERGED_BOM_PATH"] = str(merged_path)
+                    os.environ["BOM_COMPANY"] = str(company)
+                    map_main()
+                    log_to_file("Cost sheet mapping completed")
+                    self.add_log_message("Cost sheet mapping completed", "success")
+                except Exception as map_error:
+                    log_to_file(f"Cost sheet mapping failed: {map_error}")
+                    self.add_log_message(f"Cost sheet mapping failed: {map_error}", "warning")
+                
+                log_to_file("=== Pipeline Completed Successfully ===")
+                self.add_log_message("LLM pipeline completed successfully!", "success")
                 
                 # Update progress to show completion
                 self.start_progress("Pipeline completed successfully!")
@@ -1013,7 +863,7 @@ Invalid formats:
                 self.stop_progress("Pipeline completed successfully!")
                 self.add_log_message("BoM processing pipeline completed successfully!", "success")
                 
-                # Look for output files in the PDF directory (changed for debugging)
+                # Look for output files in the PDF directory
                 pdf_dir = Path(pdf).parent
                 pdf_name = Path(pdf).stem
                 
@@ -1021,7 +871,7 @@ Invalid formats:
                 expected_files = [
                     f"{pdf_name}_extracted.xlsx",
                     f"{pdf_name}_merged.xlsx", 
-                    f"{pdf_name}_with_prices.xlsx",
+                    f"{pdf_name}_merged_with_prices.xlsx",
                     f"{pdf_name}_cost_sheet.xlsx"
                 ]
                 
@@ -1034,9 +884,9 @@ Invalid formats:
                 
                 if found_files:
                     files_text = "\n".join([f"• {Path(f).name}" for f in found_files])
-                    success_message = f"Pipeline completed successfully!\n\nOutput files created:\n{files_text}\n\nLocation: {pdf_dir}\n\nDetailed log saved to: {error_log_path}"
+                    success_message = f"LLM Pipeline completed successfully!\n\nOutput files created:\n{files_text}\n\nLocation: {pdf_dir}\n\nDetailed log saved to: {error_log_path}"
                 else:
-                    success_message = f"Pipeline completed successfully!\n\nCheck the output folder for your processed files.\n\nDetailed log saved to: {error_log_path}"
+                    success_message = f"LLM Pipeline completed successfully!\n\nCheck the output folder for your processed files.\n\nDetailed log saved to: {error_log_path}"
                 
                 # Schedule the success dialog on the main thread
                 def show_success():
@@ -1047,13 +897,13 @@ Invalid formats:
                             parent=self.root
                         )
                     except Exception as gui_error:
-                        print(f"[GUI UPDATE] Could not show success dialog: {gui_error}")
+                        print(f"Could not show success dialog: {gui_error}")
                         print(f"SUCCESS: {success_message}")
                 
                 try:
                     self.root.after(0, show_success)
                 except RuntimeError as e:
-                    print(f"[GUI UPDATE] Could not schedule success dialog: {e}")
+                    print(f"Could not schedule success dialog: {e}")
                     print(f"SUCCESS: {success_message}")
                 
             except RuntimeError as runtime_error:

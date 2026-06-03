@@ -16,301 +16,187 @@ if getattr(sys, 'frozen', False):
 else:
     SCRIPT_DIR = Path(__file__).parent
 
+# ============================================================================
+# Core pipeline integration for local LLM text extraction stream (LD)
+# ============================================================================
+from pipeline.extract_main import extract_tables_from_pdf
+
+def execute_extraction_step(pdf_path, pages, company):
+    """
+    Bypasses legacy manual ROI/Tabula selectors and passes text directly to Ollama.
+    
+    This function triggers the local LLM semantic parsing pipeline for table extraction.
+    It uses pdfplumber + Ollama layout mapping engine for AI-powered extraction.
+    
+    Args:
+        pdf_path (str): Path to the PDF file
+        pages (str): Pages to extract from (e.g., "1-3" or "all")
+        company (str): Company name for custom formatting
+        
+    Returns:
+        DataFrame: Extracted table as pandas DataFrame, or None if extraction failed
+    """
+    print("[LLM] Triggering local LLM semantic parsing pipeline...")
+    
+    # This directly triggers your pdfplumber + ollama layout mapping engine (LD)
+    extracted_dfs = extract_tables_from_pdf(pdf_path, pages=pages)
+    
+    if extracted_dfs and not extracted_dfs[0].empty:
+        print(f"[OK] AI successfully extracted structured rows from the document.")
+        return extracted_dfs[0]
+    else:
+        print("[ERROR] AI engine was unable to locate a valid parts list on the provided pages.")
+        return None
+
+def run_extract_bom_with_llm(pdf_path, pages, company):
+    """
+    Run BoM extraction using the local LLM engine (Ollama + pdfplumber).
+    
+    This is the new primary extraction method that bypasses Tabula entirely
+    and uses semantic parsing via local LLM models.
+    
+    Args:
+        pdf_path (str): Path to the PDF file
+        pages (str): Pages to extract from
+        company (str): Company name for formatting
+        
+    Returns:
+        Path: Path to the merged output Excel file
+    """
+    print("=== Starting LLM-based BoM Extraction ===")
+    print(f"Using local LLM engine for intelligent table extraction...")
+    
+    # Execute the LLM-based extraction (LD)
+    extracted_df = execute_extraction_step(pdf_path, pages, company)
+    
+    if extracted_df is None:
+        print("[ERROR] LLM extraction failed - no data returned")
+        raise RuntimeError("LLM extraction failed to locate valid parts list")
+    
+    # Process and format the extracted data (LD)
+    print(f"Processing extracted data (shape: {extracted_df.shape})...")
+    
+    try:
+        from pipeline.extract_main import process_and_format_tables, merge_tables_and_export, save_tables_to_excel
+        
+        # Format the extracted table for the company (LD)
+        formatted_tables = process_and_format_tables([extracted_df], company)
+        
+        if not formatted_tables:
+            print("[ERROR] Customer formatting failed")
+            raise RuntimeError("Failed to apply customer formatting")
+        
+        print(f"[OK] Formatted {len(formatted_tables)} table(s) successfully")
+        
+        # Generate output paths (save to PDF directory) (LD)
+        pdf_dir = Path(pdf_path).parent
+        pdf_name = Path(pdf_path).stem
+        extracted_path = pdf_dir / f"{pdf_name}_extracted.xlsx"
+        merged_path = pdf_dir / f"{pdf_name}_merged.xlsx"
+        
+        # Save individual extracted tables (LD)
+        print(f"[SAVE] Saving individual extracted tables to: {extracted_path}")
+        extracted_success = save_tables_to_excel(formatted_tables, str(extracted_path))
+        
+        if extracted_success:
+            print(f"[OK] Individual tables saved: {extracted_path}")
+        else:
+            print(f"[WARNING] Warning: Failed to save individual tables to: {extracted_path}")
+        
+        # Save merged table (LD)
+        print(f"[SAVE] Saving merged table to: {merged_path}")
+        merge_success = merge_tables_and_export(formatted_tables, str(merged_path), "Combined_BoM", company)
+        
+        if not merge_success:
+            print("[ERROR] Failed to save merged tables")
+            raise RuntimeError("Failed to save merged tables")
+        
+        print(f"[OK] LLM extraction completed successfully!")
+        print(f"   Output: {merged_path}")
+        
+        return merged_path
+        
+    except Exception as e:
+        print(f"[ERROR] Processing error: {e}")
+        raise
+
 def check_all_dependencies():
     """
-    Check all required dependencies for the application.
-    Returns (can_run, dependency_status, missing_critical, warnings)
+    Check all required dependencies for the LLM pipeline. (LD)
+    Returns (can_run, dependency_status, missing_critical, warnings). (LD)
     """
     dependency_status = {}
     missing_critical = []
     warnings = []
-    
+
     print("[INFO] Checking critical dependencies...")
-    
-    # Check Java (critical for Tabula)
+
+    # ── Ollama (critical — replaces Java/Tabula) ───────────────────────────── (LD)
     try:
-        from pipeline.validation_utils import check_java_installation
-        java_ok, java_version, java_error = check_java_installation()
-        dependency_status['Java'] = {'available': java_ok, 'version': java_version, 'error': java_error}
-        if not java_ok:
-            missing_critical.append('Java')
-            warnings.append(f"Java not found: {java_error}")
-            print(f"[ERROR] Java dependency missing: {java_error}")
+        from pipeline.validation_utils import check_ollama_connection
+        ok, info, err = check_ollama_connection()
+        dependency_status['Ollama'] = {'available': ok, 'version': info, 'error': err}
+        if ok:
+            print(f"[OK] Ollama: {info}")
+            if info and 'not found' in info:
+                warnings.append(info)
         else:
-            print(f"[OK] Java available: {java_version}")
-    except ImportError as import_error:
-        dependency_status['Java'] = {'available': False, 'version': None, 'error': f"Import failed: {import_error}"}
-        missing_critical.append('Java')
-        warnings.append(f"Java check failed - import error: {import_error}")
-        print(f"[ERROR] Java check import failed: {import_error}")
+            missing_critical.append('Ollama')
+            warnings.append(f"Ollama not available: {err}")
+            print(f"[ERROR] Ollama check failed: {err}")
     except Exception as e:
-        dependency_status['Java'] = {'available': False, 'version': None, 'error': str(e)}
-        missing_critical.append('Java')
-        warnings.append(f"Java check failed: {e}")
-        print(f"[ERROR] Java check failed: {e}")
-    
-    # Check OCR dependencies (optional for most customers)
+        dependency_status['Ollama'] = {'available': False, 'version': None, 'error': str(e)}
+        missing_critical.append('Ollama')
+        warnings.append(f"Ollama check error: {e}")
+        print(f"[ERROR] Ollama check error: {e}")
+
+    # ── OCR (optional — needed only for image-based PDFs) ─────────────────── (LD)
     try:
         from pipeline.ocr_preprocessor import check_ocr_dependencies
-        has_ocr_deps, missing_ocr_deps, dep_messages, install_instructions = check_ocr_dependencies()
+        has_ocr, missing_ocr, dep_msgs, _ = check_ocr_dependencies()
         dependency_status['OCR'] = {
-            'available': has_ocr_deps, 
-            'missing': missing_ocr_deps, 
-            'messages': dep_messages
+            'available': has_ocr,
+            'missing': missing_ocr,
+            'messages': dep_msgs,
         }
-        if not has_ocr_deps:
-            warnings.append(f"OCR dependencies missing: {', '.join(missing_ocr_deps)}")
-            warnings.append("OCR features will be unavailable but basic extraction will work")
-            print(f"[WARNING] OCR dependencies missing: {', '.join(missing_ocr_deps)}")
+        if not has_ocr:
+            warnings.append(f"OCR dependencies missing: {', '.join(missing_ocr)}")
+            warnings.append("Image-based PDFs will not be supported without OCR tools")
+            print(f"[WARNING] OCR dependencies missing: {', '.join(missing_ocr)}")
         else:
-            print(f"[OK] All OCR dependencies available")
-    except ImportError as import_error:
-        dependency_status['OCR'] = {'available': False, 'error': f"Import failed: {import_error}"}
-        warnings.append(f"OCR dependency check failed - import error: {import_error}")
-        print(f"[WARNING] OCR check import failed: {import_error}")
+            print("[OK] All OCR dependencies available")
     except Exception as e:
         dependency_status['OCR'] = {'available': False, 'error': str(e)}
-        warnings.append(f"OCR dependency check failed: {e}")
+        warnings.append(f"OCR check failed: {e}")
         print(f"[WARNING] OCR check failed: {e}")
-    
-    # Determine if the application can run
+
     can_run = len(missing_critical) == 0
-    if not can_run:
-        print(f"[CRITICAL ERROR] Missing critical dependencies: {', '.join(missing_critical)}")
-        print(f"[CRITICAL ERROR] The application cannot run without these dependencies.")
-        if 'Java' in missing_critical:
-            print(f"[CRITICAL ERROR] Java is required for PDF table extraction (Tabula library).")
-            print(f"[CRITICAL ERROR] Please install Java JRE/JDK and ensure it's in your system PATH.")
-            print(f"[CRITICAL ERROR] You can test Java by opening Command Prompt and typing: java -version")
+    if can_run:
+        print("[OK] All critical dependencies satisfied — application can run")
     else:
-        print(f"[OK] All critical dependencies satisfied - application can run")
-    
+        print(f"[CRITICAL ERROR] Missing: {', '.join(missing_critical)}")
+
     return can_run, dependency_status, missing_critical, warnings
 
 def run_extract_bom_with_roi_orchestration():
     """
-    Run BoM extraction with ROI orchestration that handles fallbacks properly.
-    
-    This function provides proper architectural separation where:
-    1. extract_bom_tab.py handles only tabula-specific extraction
-    2. extract_bom_cam.py handles only camelot-specific extraction  
-    3. main_pipeline.py orchestrates the workflow and fallbacks
+    ROI extraction replaced by Ollama — routes directly to the LLM pipeline. (LD)
+    The LLM locates the BOM table from text without needing a drawn ROI region. (LD)
     """
-    print("=== BoMination Dependency Check (ROI Mode) ===")
-    can_run, dependency_status, missing_critical, warnings = check_all_dependencies()
-    
-    # Show warnings for missing optional dependencies
-    for warning in warnings:
-        print(f"[WARNING] {warning}")
-    
-    # If critical dependencies are missing, exit gracefully
-    if not can_run:
-        print(f"[CRITICAL ERROR] Cannot continue due to missing critical dependencies.")
-        print(f"[CRITICAL ERROR] Application will now exit.")
-        # Instead of sys.exit(), raise an exception that can be caught by the GUI
-        raise RuntimeError(f"Missing critical dependencies: {', '.join(missing_critical)}")
-    
-    print("=== Starting ROI BoM Extraction ===")
-    print("STEP 1: Extracting BoM tables from PDF with ROI orchestration...")
-    pdf_path = os.environ.get("BOM_PDF_PATH")
-    pages = os.environ.get("BOM_PAGE_RANGE")
-    company = os.environ.get("BOM_COMPANY")
-    output_directory = os.environ.get("BOM_OUTPUT_DIRECTORY")
-    tabula_mode = os.environ.get("BOM_TABULA_MODE", "balanced")
-    use_roi = os.environ.get("BOM_USE_ROI", "false").lower() == "true"
-    
-    if not use_roi:
-        # If not using ROI, use the standard extraction
-        return run_extract_bom()
-    
-    print("[TARGET] Using ROI-based extraction with orchestration...")
-    
-    # Step 1: Try tabula-only ROI extraction
-    print("[DATA] STEP 1: Attempting tabula ROI extraction...")
-    env = os.environ.copy()
-    env["BOM_PDF_PATH"] = str(pdf_path or "")
-    env["BOM_PAGE_RANGE"] = str(pages or "")
-    env["BOM_COMPANY"] = str(company or "")
-    env["BOM_OUTPUT_DIRECTORY"] = str(output_directory or "")
-    env["BOM_TABULA_MODE"] = str(tabula_mode)
-    env["BOM_USE_ROI"] = "true"
-    
-    command = [sys.executable, str(SCRIPT_DIR / "extract_bom_tab.py")]
-    
-    print(f"Running tabula ROI extraction: {' '.join(command)}")
-    
-    try:
-        # Add timeout to prevent hanging
-        result = subprocess.run(command, env=env, capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=300)
-    except subprocess.TimeoutExpired:
-        print("[ERROR] STEP 1 TIMEOUT: Tabula ROI extraction timed out after 5 minutes")
-        result = subprocess.CompletedProcess(command, 1, "", "Process timed out")
-    except Exception as e:
-        print(f"[ERROR] STEP 1 ERROR: Subprocess failed: {e}")
-        result = subprocess.CompletedProcess(command, 1, "", str(e))
-    
-    print(result.stdout)
-    
-    # Check if tabula ROI extraction was successful
-    pdf_dir = Path(pdf_path).parent
-    pdf_name = Path(pdf_path).stem
-    merged_path = pdf_dir / f"{pdf_name}_merged.xlsx"
-    
-    if result.returncode == 0 and merged_path.exists():
-        print("[OK] STEP 1 SUCCESS: Tabula ROI extraction completed")
-        return merged_path
-    else:
-        print("[ERROR] STEP 1 FAILED: Tabula ROI extraction")
-    
-    # Step 2: Try camelot ROI extraction as fallback
-    print("[DATA] STEP 2: Attempting camelot ROI extraction fallback...")
-    
-    # Check if ROI areas are available
-    roi_areas = os.environ.get("BOM_ROI_AREAS")
-    if not roi_areas:
-        print("[ERROR] STEP 2 FAIL: No ROI areas available for camelot fallback")
-        raise subprocess.CalledProcessError(1, command, output=result.stdout, stderr=result.stderr)
-    
-    try:
-        import json
-        from pipeline.extract_bom_cam import extract_tables_with_camelot_roi
-        from pipeline.extract_main import merge_tables_and_export
-        
-        roi_areas = json.loads(roi_areas)
-        all_tables = []
-        
-        for page_num, area in roi_areas.items():
-            print(f"[DATA] Extracting from page {page_num} using Camelot...")
-            
-            try:
-                # Convert single ROI area to list format expected by extract_tables_with_camelot_roi
-                roi_area_list = [area]  # Function expects a list of ROI areas
-                
-                print(f"[TARGET] Using ROI area: {area}")
-                
-                # Use camelot ROI extraction function
-                camelot_tables = extract_tables_with_camelot_roi(pdf_path, str(page_num), roi_areas=roi_area_list)
-                
-                if camelot_tables:
-                    for i, table in enumerate(camelot_tables):
-                        if not table.empty and table.shape[0] >= 1 and table.shape[1] >= 1:
-                            print(f"    [OK] Extracted table {i+1}: {table.shape[0]}×{table.shape[1]} (Camelot ROI)")
-                            all_tables.append(table)
-                        else:
-                            print(f"    [ERROR] Camelot table {i+1} too small or empty: {table.shape[0]}×{table.shape[1]}")
-                else:
-                    print(f"    [ERROR] No Camelot tables from page {page_num}")
-                    
-            except Exception as e:
-                print(f"    [ERROR] Camelot extraction failed for page {page_num}: {e}")
-                continue
-        
-        if all_tables:
-            print(f"[OK] STEP 2 SUCCESS: Camelot ROI extraction found {len(all_tables)} tables")
-            
-            # Always show table selection interface for debugging, even with single table
-            print("[LIST] Tables found - showing selection interface...")
-            from gui.table_selector import show_table_selector
-            selected_tables = show_table_selector(all_tables)
-            
-            if not selected_tables:
-                print("[ERROR] No tables selected by user")
-                raise subprocess.CalledProcessError(1, command, output="", stderr="No tables selected by user")
-            
-            print(f"[LIST] User selected {len(selected_tables)} tables")
-            
-            # Apply customer formatting to selected tables first (missing step)
-            print(f"[FORMAT] Applying customer formatting for company: {company}")
-            from pipeline.extract_main import process_and_format_tables
-            formatted_tables = process_and_format_tables(selected_tables, company)
-            
-            if not formatted_tables:
-                print("[ERROR] Customer formatting failed")
-                raise subprocess.CalledProcessError(1, command, output="", stderr="Customer formatting failed")
-            
-            print(f"[OK] Customer formatting applied successfully to {len(formatted_tables)} tables")
-            
-            # Save individual extracted tables first (like extract_bom_tab does)
-            extracted_path = pdf_dir / f"{pdf_name}_extracted.xlsx"
-            print(f"💾 Saving individual extracted tables to: {extracted_path}")
-            from pipeline.extract_main import save_tables_to_excel
-            extracted_success = save_tables_to_excel(formatted_tables, str(extracted_path))
-            
-            if extracted_success:
-                print(f"[OK] Individual tables saved: {extracted_path}")
-            else:
-                print(f"[ERROR] Failed to save individual tables to: {extracted_path}")
-            
-            # Save the formatted tables using the same logic as extract_bom_tab
-            print(f"💾 Saving merged table to: {merged_path}")
-            success = merge_tables_and_export(formatted_tables, str(merged_path), "Combined_BoM", company)
-            
-            if success:
-                print(f"[OK] Camelot ROI extraction completed successfully!")
-                return merged_path
-            else:
-                print("[ERROR] Failed to save merged tables from camelot")
-                raise subprocess.CalledProcessError(1, command, output="", stderr="Failed to save merged tables")
-        else:
-            print("[ERROR] STEP 2 FAIL: Camelot ROI extraction found no tables")
-            raise subprocess.CalledProcessError(1, command, output=result.stdout, stderr=result.stderr)
-            
-    except Exception as e:
-        print(f"[ERROR] STEP 2 ERROR: Camelot ROI orchestration failed: {e}")
-        raise subprocess.CalledProcessError(1, command, output=result.stdout, stderr=str(e))
+    print("[LLM] ROI mode ignored — using Ollama LLM extraction instead")
+    return run_extract_bom()
 
 def run_extract_bom():
-    print("=== BoMination Dependency Check ===")
-    can_run, dependency_status, missing_critical, warnings = check_all_dependencies()
-    
-    # Show warnings for missing optional dependencies
-    for warning in warnings:
-        print(f"[WARNING] {warning}")
-    
-    # If critical dependencies are missing, exit gracefully
-    if not can_run:
-        print(f"[CRITICAL ERROR] Cannot continue due to missing critical dependencies.")
-        print(f"[CRITICAL ERROR] Application will now exit.")
-        # Instead of sys.exit(), raise an exception that can be caught by the GUI
-        raise RuntimeError(f"Missing critical dependencies: {', '.join(missing_critical)}")
-    
-    print("=== Starting BoM Extraction ===")
-    print("STEP 1: Extracting BoM tables from PDF...")
+    """
+    Extract BoM tables using the Ollama LLM pipeline. (LD)
+    Replaces the legacy Tabula subprocess invocation. (LD)
+    """
     pdf_path = os.environ.get("BOM_PDF_PATH")
-    pages = os.environ.get("BOM_PAGE_RANGE")
-    company = os.environ.get("BOM_COMPANY")
-    output_directory = os.environ.get("BOM_OUTPUT_DIRECTORY")
-    tabula_mode = os.environ.get("BOM_TABULA_MODE", "balanced")
-    use_roi = os.environ.get("BOM_USE_ROI", "false")
+    pages = os.environ.get("BOM_PAGE_RANGE", "all")
+    company = os.environ.get("BOM_COMPANY", "")
 
-    env = os.environ.copy()
-    env["BOM_PDF_PATH"] = str(pdf_path or "")
-    env["BOM_PAGE_RANGE"] = str(pages or "")
-    env["BOM_COMPANY"] = str(company or "")
-    env["BOM_OUTPUT_DIRECTORY"] = str(output_directory or "")
-    env["BOM_TABULA_MODE"] = str(tabula_mode)
-    env["BOM_USE_ROI"] = str(use_roi)
-
-    command = [sys.executable, str(SCRIPT_DIR / "extract_bom_tab.py")]
-    
-    print(f"Running command: {' '.join(command)}")
-    print(f"Tabula mode: {tabula_mode}")
-    print(f"Use ROI: {use_roi}")
-    result = subprocess.run(command, env=env, capture_output=True, text=True, encoding='utf-8', errors='ignore')
-    
-    print(result.stdout)
-    if result.returncode != 0:
-        print("ERROR: Table extraction failed:")
-        print(result.stderr)
-        raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout, stderr=result.stderr)
-
-    # Generate the expected merged file path - save to PDF directory for debugging
-    pdf_dir = Path(pdf_path).parent
-    pdf_name = Path(pdf_path).stem
-    merged_path = pdf_dir / f"{pdf_name}_merged.xlsx"
-    
-    print(f"SUCCESS: Expected merged file: {merged_path}")
-    return merged_path
+    print("=== Starting LLM BoM Extraction ===")
+    return run_extract_bom_with_llm(pdf_path, pages, company)
 
 def run_price_lookup(merged_path):
     print("STEP 2: Running price lookup...")
@@ -549,10 +435,10 @@ def run_main_pipeline_direct(pdf_path, pages, company, output_directory, tabula_
         
         # Verify the merged file exists
         if not merged_path.exists():
-            print(f"❌ ERROR: Expected merged file not found: {merged_path}")
+            print(f"[ERROR] ERROR: Expected merged file not found: {merged_path}")
             raise FileNotFoundError(f"Merged file not found: {merged_path}")
         
-        print(f"✅ Merged file found: {merged_path}")
+        print(f"[OK] Merged file found: {merged_path}")
         
         print(f"Looking for merged file in PDF directory: {merged_path}")
         print(f"(Output directory setting: {output_directory or 'None - using PDF directory'})")
@@ -575,7 +461,7 @@ def run_main_pipeline_direct(pdf_path, pages, company, output_directory, tabula_
             lookup_main()
             print("✓ Price lookup completed successfully")
         except Exception as lookup_error:
-            print(f"❌ Price lookup failed with error: {lookup_error}")
+            print(f" Price lookup failed with error: {lookup_error}")
             print("This error prevents price data from being retrieved.")
             print("The pipeline will continue with the merged file, but prices will not be available.")
             
