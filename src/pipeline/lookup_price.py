@@ -203,9 +203,10 @@ def lookup_prices_for_bom(df):
             out_row['Lead Time on Additional Stock in Weeks'] = price_data['lead_time_weeks']
             out_row['Notes'] = price_data['notes']
             try:
-                out_row['Unit Price in USD'] = float(price_data['unit_price'])
-            except ValueError:
-                out_row['Unit Price in USD'] = 0.0
+                val = price_data['unit_price']
+                out_row['Unit Price in USD'] = float(val) if val not in ('N/A', 'n/a', '', None) else ''
+            except (ValueError, TypeError):
+                out_row['Unit Price in USD'] = ''
         else:
             print(f'  [SKIP] No search results for {pn}')
 

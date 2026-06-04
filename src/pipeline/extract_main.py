@@ -9,6 +9,7 @@ import json
 import re
 import traceback
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
@@ -37,6 +38,7 @@ If no BOM table is present return ONLY:
 RULES:
 - Use the EXACT column headers from the document — do not rename them
 - Include EVERY data row — do not skip or summarize
+- Preserve the exact row order as they appear in the document — do not reorder, sort, or group rows
 - Use empty string "" for blank cells
 - Each row must have the same number of values as the headers list
 
@@ -197,6 +199,24 @@ def parse_ollama_response_as_tables(response_text):
     return [df]
 
 
+def _split_into_chunks(text, chunk_size=10000, overlap=500):
+    """Split text into overlapping chunks snapped to newline boundaries. (LD)"""
+    if len(text) <= chunk_size:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        if end < len(text):
+            last_nl = chunk.rfind('\n')
+            if last_nl > chunk_size // 2:
+                chunk = chunk[:last_nl]
+        chunks.append(chunk)
+        start += len(chunk) - overlap
+    return chunks
+
+
 def _merge_same_schema_tables(tables):
     """Concatenate tables that share the same column set (multi-page BOMs). (LD)"""
     if not tables:
@@ -244,34 +264,29 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
                     continue
 
                 page_content = f'--- PAGE {idx + 1} ---\n{page_text}'
-                CHUNK_SIZE = 10000
-                CHUNK_OVERLAP = 500
+                if len(page_content) > 32000:
+                    page_content = page_content[:32000]
 
-                if len(page_content) <= CHUNK_SIZE:
-                    chunks = [page_content]
-                else:
-                    # Split into overlapping chunks so rows aren't cut mid-line
-                    chunks = []
-                    start = 0
-                    while start < len(page_content):
-                        end = start + CHUNK_SIZE
-                        chunk = page_content[start:end]
-                        # Snap end to the last newline so we don't cut mid-row
-                        if end < len(page_content):
-                            last_nl = chunk.rfind('\n')
-                            if last_nl > CHUNK_SIZE // 2:
-                                chunk = chunk[:last_nl]
-                        chunks.append(chunk)
-                        start += len(chunk) - CHUNK_OVERLAP
+                chunks = _split_into_chunks(page_content)
+                n = len(chunks)
+                labels = [
+                    f'Page {idx + 1}' if n == 1
+                    else f'Page {idx + 1} chunk {i + 1}/{n}'
+                    for i in range(n)
+                ]
+                print(f'[LLM] Page {idx + 1}: {len(page_content)} chars → {n} chunk(s), running parallel')
 
-                for chunk_idx, chunk in enumerate(chunks):
-                    label = f'Page {idx + 1}' if len(chunks) == 1 else f'Page {idx + 1} chunk {chunk_idx + 1}/{len(chunks)}'
+                def _run_chunk(args):
+                    chunk, label = args
                     print(f'[LLM] {label}: {len(chunk)} chars — sending to Ollama...')
                     prompt = EXTRACTION_PROMPT.format(text=chunk)
                     response_text = call_local_ollama(prompt)
-                    print(f'[LLM] {label}: response {len(response_text)} chars')
-                    page_tables = parse_ollama_response_as_tables(response_text)
-                    all_raw_tables.extend(page_tables)
+                    print(f'[LLM] {label}: {len(response_text)} chars response')
+                    return parse_ollama_response_as_tables(response_text)
+
+                with ThreadPoolExecutor(max_workers=n) as executor:
+                    for chunk_tables in executor.map(_run_chunk, zip(chunks, labels)):
+                        all_raw_tables.extend(chunk_tables)
 
         if not all_raw_tables:
             print('[LLM] No tables parsed from any page')
@@ -411,6 +426,13 @@ def process_and_format_tables(tables, customer_name=''):
     return processed
 
 
+def _autofit_columns(ws, max_width=60):
+    """Set column widths based on the longest cell value in each column. (LD)"""
+    for col in ws.columns:
+        max_len = max((len(str(cell.value or '')) for cell in col), default=0)
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, max_width)
+
+
 def save_tables_to_excel(tables, output_path):
     """Save each table to its own sheet in an Excel workbook. (LD)"""
     if not tables:
@@ -420,7 +442,9 @@ def save_tables_to_excel(tables, output_path):
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             for i, table in enumerate(tables):
-                table.to_excel(writer, sheet_name=f'Table_{i + 1}', index=False)
+                sheet_name = f'Table_{i + 1}'
+                table.to_excel(writer, sheet_name=sheet_name, index=False)
+                _autofit_columns(writer.sheets[sheet_name])
         print(f'[SAVE] {len(tables)} table(s) saved: {output_path}')
         return True
     except Exception as e:
@@ -442,6 +466,7 @@ def merge_tables_and_export(tables, output_path, sheet_name='Combined_BoM', comp
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             merged.to_excel(writer, sheet_name=sheet_name, index=False)
+            _autofit_columns(writer.sheets[sheet_name])
 
         print(f'[MERGE] Merged {merged.shape[0]}x{merged.shape[1]} table saved: {output_path}')
         return True

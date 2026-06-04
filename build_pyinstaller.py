@@ -37,7 +37,6 @@ def check_dependencies():
     required_packages = {
         'pyinstaller': 'PyInstaller',
         'pandas': 'pandas',
-        'selenium': 'selenium',
         'ttkbootstrap': 'ttkbootstrap',
         'tabula-py': 'tabula',
         'openpyxl': 'openpyxl',
