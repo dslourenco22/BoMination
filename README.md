@@ -4,7 +4,7 @@ A Python-based tool for extracting, processing, and managing Bill of Materials (
 
 ## Features
 
-- **AI-Powered Extraction**: Uses a local Ollama LLM (llama3.2) with pdfplumber for semantic BoM table parsing — no Tabula or Java required
+- **AI-Powered Extraction**: Uses a local Ollama LLM (llama3.2 or llama3.2:1b for faster CPU-only machines) with pdfplumber for semantic BoM table parsing — no Tabula or Java required
 - **OCR Support**: Automatically preprocesses scanned/image-based PDFs via OCRmyPDF before extraction
 - **Multi-Customer Formatting**: Auto-detects and applies customer-specific column mappings and rules
 - **Interactive GUI**: ttkbootstrap-based interface with tabbed layout, settings panel, and table preview
@@ -56,7 +56,7 @@ The application auto-detects the customer from document content and applies spec
 ## Requirements
 
 - Python 3.8+
-- [Ollama](https://ollama.com/) running locally with the `llama3.2` model pulled
+- [Ollama](https://ollama.com/) running locally with `llama3.2` (recommended) or `llama3.2:1b` (faster on CPU-only machines) pulled
 - Tesseract OCR (required by OCRmyPDF for scanned/image-based PDFs)
 
 > **Note:** Java is no longer required. The primary extraction pipeline uses pdfplumber + Ollama and does not depend on Tabula.
@@ -77,7 +77,8 @@ The application auto-detects the customer from document content and applies spec
 3. **Install and start Ollama:**
    ```bash
    # Install from https://ollama.com, then:
-   ollama pull llama3.2
+   ollama pull llama3.2        # full model (recommended, requires GPU or is slow on CPU)
+   ollama pull llama3.2:1b     # lightweight alternative — ~3x faster on CPU-only machines
    ollama serve
    ```
 
@@ -97,7 +98,7 @@ python src/gui/BoMinationApp.py
 
 | Variable | Description | Default |
 |---|---|---|
-| `BOM_LLM_MODEL` | Ollama model to use for extraction | `llama3.2` |
+| `BOM_LLM_MODEL` | Ollama model to use for extraction | `llama3.2` (use `llama3.2:1b` for CPU-only) |
 | `BOM_LLM_ENDPOINT` | Ollama API endpoint | `http://127.0.0.1:11434` |
 | `BOM_PDF_PATH` | Path to the PDF file to process | _(set via GUI)_ |
 | `BOM_PAGE_RANGE` | Page range to extract (e.g. `1-3` or `all`) | `all` |

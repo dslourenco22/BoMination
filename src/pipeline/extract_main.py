@@ -145,7 +145,7 @@ def call_local_ollama(prompt):
             model=MODEL,
             messages=[{'role': 'user', 'content': prompt}],
             format='json',
-            options={'temperature': 0, 'num_ctx': 32768},
+            options={'temperature': 0, 'num_ctx': 8192, 'num_predict': 2048},
         )
         return response['message']['content']
     except Exception as e:
@@ -207,7 +207,7 @@ def _merge_same_schema_tables(tables):
         groups.setdefault(key, []).append(t)
     result = []
     for group in groups.values():
-        merged = pd.concat(group, ignore_index=True) if len(group) > 1 else group[0]
+        merged = pd.concat(group, ignore_index=True).drop_duplicates().reset_index(drop=True) if len(group) > 1 else group[0]
         result.append(merged)
     return result
 
@@ -244,18 +244,34 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
                     continue
 
                 page_content = f'--- PAGE {idx + 1} ---\n{page_text}'
-                # Per-page cap — leaves room for the prompt wrapper inside num_ctx=32768
-                if len(page_content) > 32000:
-                    print(f'[LLM] Page {idx + 1}: text capped at 32 000 chars')
-                    page_content = page_content[:32000]
+                CHUNK_SIZE = 10000
+                CHUNK_OVERLAP = 500
 
-                print(f'[LLM] Page {idx + 1}: {len(page_content)} chars — sending to Ollama...')
-                prompt = EXTRACTION_PROMPT.format(text=page_content)
-                response_text = call_local_ollama(prompt)
-                print(f'[LLM] Page {idx + 1}: response {len(response_text)} chars')
+                if len(page_content) <= CHUNK_SIZE:
+                    chunks = [page_content]
+                else:
+                    # Split into overlapping chunks so rows aren't cut mid-line
+                    chunks = []
+                    start = 0
+                    while start < len(page_content):
+                        end = start + CHUNK_SIZE
+                        chunk = page_content[start:end]
+                        # Snap end to the last newline so we don't cut mid-row
+                        if end < len(page_content):
+                            last_nl = chunk.rfind('\n')
+                            if last_nl > CHUNK_SIZE // 2:
+                                chunk = chunk[:last_nl]
+                        chunks.append(chunk)
+                        start += len(chunk) - CHUNK_OVERLAP
 
-                page_tables = parse_ollama_response_as_tables(response_text)
-                all_raw_tables.extend(page_tables)
+                for chunk_idx, chunk in enumerate(chunks):
+                    label = f'Page {idx + 1}' if len(chunks) == 1 else f'Page {idx + 1} chunk {chunk_idx + 1}/{len(chunks)}'
+                    print(f'[LLM] {label}: {len(chunk)} chars — sending to Ollama...')
+                    prompt = EXTRACTION_PROMPT.format(text=chunk)
+                    response_text = call_local_ollama(prompt)
+                    print(f'[LLM] {label}: response {len(response_text)} chars')
+                    page_tables = parse_ollama_response_as_tables(response_text)
+                    all_raw_tables.extend(page_tables)
 
         if not all_raw_tables:
             print('[LLM] No tables parsed from any page')
