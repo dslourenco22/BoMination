@@ -509,6 +509,12 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
 
     print("Mapped headers from cost sheet:", excel_headers)
 
+    # Clear all data rows in the template before writing so stale content
+    # from previous runs doesn't bleed through below our new data
+    for clear_row in range(header_row + 1, header_row + 300):
+        for col_idx in excel_headers.values():
+            ws.cell(row=clear_row, column=col_idx).value = None
+
     # Insert data row by row
     for i, row in df_out.iterrows():
         for col_name, value in row.items():

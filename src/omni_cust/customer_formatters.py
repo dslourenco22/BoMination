@@ -61,19 +61,32 @@ def clean_farrell_columns(df):
             else:
                 mfr_vals = pd.Series([''] * len(df), index=df.index)
                 mpn_vals = raw.where(has_slash, other='')
-            # Strip any description text that bled into the MPN value.
-            # Real part numbers have no embedded spaces — everything after the
-            # first space is description spillover from an adjacent column.
-            def _clean_mpn(val):
+            # Split MPN from any trailing description text that bled in.
+            # Capture the overflow so it can fill empty DESCRIPTION cells.
+            def _split_mpn_overflow(val):
                 val = str(val).strip()
-                # Take only the leading alphanumeric/hyphen/dot/slash token
-                m = re.match(r'^([\w\-\.\/]+)', val)
-                return m.group(1) if m else val
+                m = re.match(r'^([\w\-\.\/]+)\s*(.*)', val, re.DOTALL)
+                if m:
+                    return m.group(1), m.group(2).strip()
+                return val, ''
 
-            mpn_vals = mpn_vals.apply(_clean_mpn)
+            parsed      = mpn_vals.apply(_split_mpn_overflow)
+            mpn_clean   = parsed.apply(lambda x: x[0])
+            desc_overflow = parsed.apply(lambda x: x[1])
+
+            # Find the DESCRIPTION column and back-fill empty cells with overflow
+            desc_col = next(
+                (c for c in df.columns if 'DESC' in str(c).upper()), None
+            )
+            if desc_col is not None:
+                empty_mask = df[desc_col].fillna('').astype(str).str.strip() == ''
+                df.loc[empty_mask, desc_col] = desc_overflow[empty_mask].values
+                filled = empty_mask.sum()
+                if filled:
+                    print(f"🔧 FARRELL DEBUG: Recovered descriptions for {filled} row(s) from MPN overflow")
 
             df.insert(0, "Manufacturer", mfr_vals)
-            df.insert(1, "MPN", mpn_vals)
+            df.insert(1, "MPN", mpn_clean)
             print("🔧 FARRELL DEBUG: ✅ Split MFG/PART into Manufacturer and MPN")
             df.drop(columns=[part_col], inplace=True)
 

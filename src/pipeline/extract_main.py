@@ -422,17 +422,22 @@ def clean_and_filter_tables(tables, method_name):
                 print(f'  [SKIP] Table {i + 1}: low content ratio ({ratio:.2f})')
                 continue
 
-            # Drop rows that look like footer/legal/disclaimer text rather than BOM data
+            # Drop rows that are clearly legal/disclaimer text, not BOM data.
+            # Keep phrases very specific so manufacturer names never match.
             junk_phrases = [
-                'INFORMATION CONTAINED', 'THIS DOCUMENT', 'CORPORATION',
-                'PROPRIETARY', 'CONFIDENTIAL', 'ALL RIGHTS RESERVED',
-                'DO NOT REPRODUCE', 'WITHOUT WRITTEN', 'REVISION HISTORY',
-                'DRAWING NO', 'APPROVED BY', 'CHECKED BY', 'DRAWN BY',
+                'ALL RIGHTS RESERVED',
+                'DO NOT REPRODUCE',
+                'WITHOUT WRITTEN PERMISSION',
+                'PROPRIETARY AND CONFIDENTIAL',
+                'INFORMATION CONTAINED HEREIN IS THE PROPERTY',
+                'APPROVED BY', 'CHECKED BY', 'DRAWN BY',
             ]
             def _is_junk_row(row):
                 combined = ' '.join(str(v) for v in row).upper()
-                # Long prose with no part-number-like token is likely junk
-                if len(combined) > 80 and not re.search(r'[A-Z0-9]{4,}[-/][A-Z0-9]', combined):
+                # Part numbers are alphanumeric+hyphen/slash tokens of 4+ chars,
+                # OR standalone uppercase tokens of 5+ chars (e.g. T153930).
+                has_pn = bool(re.search(r'[A-Z0-9]{3,}[-/][A-Z0-9]|[A-Z0-9]{5,}', combined))
+                if len(combined) > 100 and not has_pn:
                     return True
                 return any(phrase in combined for phrase in junk_phrases)
 

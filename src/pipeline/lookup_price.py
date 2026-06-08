@@ -7,6 +7,7 @@ works without any changes. (LD)
 """
 
 import os
+import re
 import json
 import time
 import traceback
@@ -70,7 +71,6 @@ def _find_part_number_col(df):
     for name in candidates:
         if name in df.columns:
             return name
-    # Case-insensitive fallback (LD)
     for col in df.columns:
         if any(kw in col.upper() for kw in ['MPN', 'PART', 'MODEL']):
             return col
@@ -89,26 +89,84 @@ def _find_qty_col(df):
     return None
 
 
-def _search_ddg(part_number):
-    """Search DuckDuckGo for the part number and return formatted result text. (LD)"""
-    try:
-        from duckduckgo_search import DDGS
-        query = f'"{part_number}" buy price USD electronics component distributor'
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5))
-        if not results:
-            return None
-        lines = []
-        for r in results:
-            lines.append(
-                f"Title: {r.get('title', '')}\n"
-                f"URL: {r.get('href', '')}\n"
-                f"Snippet: {r.get('body', '')}"
-            )
-        return '\n\n'.join(lines)
-    except Exception as e:
-        print(f'  [DDG] Search failed for {part_number}: {e}')
+def _find_mfr_col(df):
+    """Return the column name holding manufacturer names, or None. (LD)"""
+    candidates = ['Manufacturer', 'MFR', 'MANUFACTURER', 'MFG', 'BRAND', 'MAKE']
+    for name in candidates:
+        if name in df.columns:
+            return name
+    for col in df.columns:
+        if any(kw in col.upper() for kw in ['MANUFACTURER', 'MFR', 'MFG']):
+            return col
+    return None
+
+
+def _extract_price_regex(text):
+    """
+    Fast regex price extraction — tries common price patterns before Ollama. (LD)
+    Returns the lowest positive price found, or None.
+    """
+    patterns = [
+        r'\$\s*([\d,]{1,8}\.\d{2})',             # $12.50 / $1,234.56
+        r'USD\s*([\d,]{1,8}\.\d{2})',             # USD 12.50
+        r'([\d,]{1,8}\.\d{2})\s*USD',             # 12.50 USD
+        r'(?:Price|Each|Unit)[:\s]+\$?\s*([\d,]{1,8}\.\d{2})',  # Price: $12.50
+        r'(?:List|Net|Your)[:\s]+\$?\s*([\d,]{1,8}\.\d{2})',    # List: $45.00
+    ]
+    found = []
+    for pattern in patterns:
+        for m in re.findall(pattern, text, re.IGNORECASE):
+            try:
+                found.append(float(m.replace(',', '')))
+            except ValueError:
+                pass
+    valid = [p for p in found if 0 < p < 1_000_000]
+    return min(valid) if valid else None
+
+
+def _search_ddg(part_number, manufacturer=''):
+    """
+    Search DuckDuckGo using manufacturer + part number for better results. (LD)
+    Returns formatted search result text, or None.
+    """
+    from duckduckgo_search import DDGS
+
+    skip = {'', 'n/a', 'nan', 'none', 'generic'}
+    mfr_prefix = f'{manufacturer} ' if manufacturer.lower() not in skip else ''
+
+    queries = [
+        f'{mfr_prefix}{part_number} price buy distributor',
+        f'{mfr_prefix}"{part_number}" price USD',
+        f'{part_number} price buy',
+    ]
+
+    def _run(q):
+        try:
+            with DDGS(timeout=15) as ddgs:
+                return list(ddgs.text(q, max_results=5))
+        except Exception as e:
+            print(f'  [DDG] Query failed ({q!r}): {type(e).__name__}: {e}')
+            return []
+
+    results = []
+    for q in queries:
+        results = _run(q)
+        if results:
+            break
+        time.sleep(1)
+
+    if not results:
+        print(f'  [DDG] No results for {mfr_prefix}{part_number}')
         return None
+
+    lines = []
+    for r in results:
+        lines.append(
+            f"Title: {r.get('title', '')}\n"
+            f"URL: {r.get('href', '')}\n"
+            f"Snippet: {r.get('body', '')}"
+        )
+    return '\n\n'.join(lines)
 
 
 def _parse_price_with_ollama(part_number, qty, search_text):
@@ -155,60 +213,75 @@ def _parse_price_with_ollama(part_number, qty, search_text):
 def lookup_prices_for_bom(df):
     """
     Main price-lookup loop. (LD)
-    For every row in the BOM DataFrame, queries DDG + Ollama and appends (LD)
-    pricing columns. Returns a new DataFrame with OEMSecrets-compatible columns. (LD)
+    For every row in the BOM DataFrame, searches using manufacturer + MPN,
+    tries regex price extraction first, falls back to Ollama if regex misses. (LD)
+    Returns a new DataFrame with OEMSecrets-compatible columns. (LD)
     """
-    pn_col = _find_part_number_col(df)
+    pn_col  = _find_part_number_col(df)
     qty_col = _find_qty_col(df)
+    mfr_col = _find_mfr_col(df)
 
     if pn_col is None:
         print('[PRICE] No part-number column found — skipping price lookup')
         return _build_empty_output(df)
 
     print(f'[PRICE] Looking up prices for {len(df)} parts '
-          f'(part col: {pn_col}, qty col: {qty_col or "none"})')
+          f'(MPN col: {pn_col}, MFR col: {mfr_col or "none"}, QTY col: {qty_col or "none"})')
 
     rows_out = []
     for idx, row in df.iterrows():
-        pn = str(row[pn_col]).strip()
+        pn  = str(row[pn_col]).strip()
         qty = str(row[qty_col]).strip() if qty_col else '1'
+        mfr = str(row[mfr_col]).strip() if mfr_col else ''
 
-        # Build the output row with OEMSecrets column names (LD)
         out_row = {
-            'Internal Reference':               '',
-            'Part Number':                       pn,
-            'Quantity for Single BOM':           qty,
-            'Extended Quantity for 1 BOM':       qty,
-            'Manufacturer':                      'N/A',
-            'Distributor':                       'N/A',
-            'Minimum Order':                     'N/A',
-            'Unit Price in USD':                 0.0,
+            'Internal Reference':                    '',
+            'Part Number':                            pn,
+            'Quantity for Single BOM':                qty,
+            'Extended Quantity for 1 BOM':            qty,
+            'Manufacturer':                           mfr if mfr.lower() not in ('n/a', '', 'nan') else 'N/A',
+            'Distributor':                            'N/A',
+            'Minimum Order':                          'N/A',
+            'Unit Price in USD':                      '',
             'Lead Time on Additional Stock in Weeks': 'N/A',
-            'Notes':                             '',
+            'Notes':                                  '',
         }
 
-        # Skip blank / placeholder part numbers (LD)
         if not pn or pn.lower() in ('n/a', 'nan', 'none', ''):
             rows_out.append(out_row)
             continue
 
-        print(f'  [{idx + 1}/{len(df)}] Searching: {pn}')
-        search_text = _search_ddg(pn)
+        label = f'{mfr} {pn}' if mfr and mfr.lower() not in ('n/a', '', 'nan', 'generic') else pn
+        print(f'  [{idx + 1}/{len(df)}] Searching: {label}')
+
+        search_text = _search_ddg(pn, mfr)
 
         if search_text:
-            price_data = _parse_price_with_ollama(pn, qty, search_text)
-            out_row['Manufacturer'] = price_data['manufacturer']
-            out_row['Distributor'] = price_data['distributor']
-            out_row['Minimum Order'] = price_data['min_order']
-            out_row['Lead Time on Additional Stock in Weeks'] = price_data['lead_time_weeks']
-            out_row['Notes'] = price_data['notes']
-            try:
-                val = price_data['unit_price']
-                out_row['Unit Price in USD'] = float(val) if val not in ('N/A', 'n/a', '', None) else ''
-            except (ValueError, TypeError):
-                out_row['Unit Price in USD'] = ''
+            # ── Fast path: try regex extraction first ──────────────────────
+            regex_price = _extract_price_regex(search_text)
+            if regex_price is not None:
+                print(f'  [REGEX] Found price ${regex_price:.2f} for {label}')
+                out_row['Unit Price in USD'] = regex_price
+            else:
+                # ── Slow path: ask Ollama to interpret the snippets ────────
+                price_data = _parse_price_with_ollama(pn, qty, search_text)
+                out_row['Distributor']  = price_data['distributor']
+                out_row['Minimum Order'] = price_data['min_order']
+                out_row['Lead Time on Additional Stock in Weeks'] = price_data['lead_time_weeks']
+                out_row['Notes']        = price_data['notes']
+                if price_data['manufacturer'] not in ('N/A', '', 'nan'):
+                    out_row['Manufacturer'] = price_data['manufacturer']
+                try:
+                    val = price_data['unit_price']
+                    out_row['Unit Price in USD'] = float(val) if val not in ('N/A', 'n/a', '', None) else ''
+                except (ValueError, TypeError):
+                    out_row['Unit Price in USD'] = ''
+                if out_row['Unit Price in USD'] == '':
+                    print(f'  [MISS] No price found for {label}')
+                else:
+                    print(f'  [OLLAMA] Found price ${out_row["Unit Price in USD"]:.2f} for {label}')
         else:
-            print(f'  [SKIP] No search results for {pn}')
+            print(f'  [SKIP] No search results for {label}')
 
         rows_out.append(out_row)
         time.sleep(SEARCH_DELAY)
