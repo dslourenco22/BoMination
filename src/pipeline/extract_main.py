@@ -201,6 +201,66 @@ def parse_ollama_response_as_tables(response_text):
     return [df]
 
 
+def _split_two_column_page(pdf_page):
+    """
+    Contextually detect two side-by-side BOM tables on a page.
+
+    Works by checking whether strong BOM header words (ITEM, QTY, DESCRIPTION,
+    COMMENTS) appear at two x-positions separated by ≥25% of the page width.
+    On a single-column BOM those words appear once; on a schematic they may not
+    appear at all. Only a genuine two-column BOM layout triggers a split.
+    Falls back to [pdf_page] for everything else.
+    """
+    try:
+        words = pdf_page.extract_words()
+        if not words:
+            return [pdf_page]
+
+        page_w = pdf_page.width
+
+        # Anchor keywords: short, distinctive, unlikely to appear in part data
+        anchor_keys = {'ITEM', 'QTY', 'DESCRIPTION', 'COMMENTS'}
+        kw_positions = {}
+        for w in words:
+            key = w['text'].upper().strip().rstrip('.')
+            if key in anchor_keys:
+                kw_positions.setdefault(key, []).append(w['x0'])
+
+        # For each keyword, check if it appears at two x-positions far enough apart
+        split_candidates = []
+        for kw, positions in kw_positions.items():
+            if len(positions) < 2:
+                continue
+            for i, xi in enumerate(sorted(positions)):
+                for xj in sorted(positions)[i + 1:]:
+                    if xj - xi >= page_w * 0.25:
+                        split_candidates.append((xi + xj) / 2)
+                        print(f'[SPLIT] "{kw}" at x={xi:.0f} and x={xj:.0f} — two-column signal')
+                        break
+
+        if not split_candidates:
+            return [pdf_page]
+
+        # Use the median candidate as the split line
+        split_x = sorted(split_candidates)[len(split_candidates) // 2]
+
+        # Both sides must have meaningful content (not just whitespace)
+        left_count  = sum(1 for w in words if w['x1'] <= split_x)
+        right_count = sum(1 for w in words if w['x0'] >= split_x)
+        if left_count < 15 or right_count < 15:
+            return [pdf_page]
+
+        print(f'[SPLIT] Two-column BOM confirmed — splitting at x={split_x:.1f}')
+        return [
+            pdf_page.crop((0,       0, split_x,      pdf_page.height)),
+            pdf_page.crop((split_x, 0, pdf_page.width, pdf_page.height)),
+        ]
+
+    except Exception as e:
+        print(f'[SPLIT] Column detection failed, using full page: {e}')
+        return [pdf_page]
+
+
 def _split_into_chunks(text, chunk_size=10000, overlap=500):
     """Split text into overlapping chunks snapped to newline boundaries. (LD)"""
     if len(text) <= chunk_size:
@@ -260,35 +320,44 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
             all_raw_tables = []
             for idx in page_indexes:
                 page = pdf.pages[idx]
-                page_text = page.extract_text() or ''
-                if not page_text.strip():
-                    print(f'[LLM] Page {idx + 1}: no text, skipping')
-                    continue
 
-                page_content = f'--- PAGE {idx + 1} ---\n{page_text}'
-                if len(page_content) > 32000:
-                    page_content = page_content[:32000]
+                # Split two-column pages at the PDF level before extracting text
+                sub_pages = _split_two_column_page(page)
 
-                chunks = _split_into_chunks(page_content)
-                n = len(chunks)
-                labels = [
-                    f'Page {idx + 1}' if n == 1
-                    else f'Page {idx + 1} chunk {i + 1}/{n}'
-                    for i in range(n)
-                ]
-                print(f'[LLM] Page {idx + 1}: {len(page_content)} chars → {n} chunk(s), running parallel')
+                for col_idx, sub_page in enumerate(sub_pages):
+                    prefix = (
+                        f'Page {idx + 1}' if len(sub_pages) == 1
+                        else f'Page {idx + 1} col {col_idx + 1}'
+                    )
+                    page_text = sub_page.extract_text() or ''
+                    if not page_text.strip():
+                        print(f'[LLM] {prefix}: no text, skipping')
+                        continue
 
-                def _run_chunk(args):
-                    chunk, label = args
-                    print(f'[LLM] {label}: {len(chunk)} chars — sending to Ollama...')
-                    prompt = EXTRACTION_PROMPT.format(text=chunk)
-                    response_text = call_local_ollama(prompt)
-                    print(f'[LLM] {label}: {len(response_text)} chars response')
-                    return parse_ollama_response_as_tables(response_text)
+                    page_content = f'--- {prefix} ---\n{page_text}'
+                    if len(page_content) > 32000:
+                        page_content = page_content[:32000]
 
-                with ThreadPoolExecutor(max_workers=n) as executor:
-                    for chunk_tables in executor.map(_run_chunk, zip(chunks, labels)):
-                        all_raw_tables.extend(chunk_tables)
+                    chunks = _split_into_chunks(page_content)
+                    n = len(chunks)
+                    labels = [
+                        prefix if n == 1
+                        else f'{prefix} chunk {i + 1}/{n}'
+                        for i in range(n)
+                    ]
+                    print(f'[LLM] {prefix}: {len(page_content)} chars → {n} chunk(s), running parallel')
+
+                    def _run_chunk(args):
+                        chunk, label = args
+                        print(f'[LLM] {label}: {len(chunk)} chars — sending to Ollama...')
+                        prompt = EXTRACTION_PROMPT.format(text=chunk)
+                        response_text = call_local_ollama(prompt)
+                        print(f'[LLM] {label}: {len(response_text)} chars response')
+                        return parse_ollama_response_as_tables(response_text)
+
+                    with ThreadPoolExecutor(max_workers=n) as executor:
+                        for chunk_tables in executor.map(_run_chunk, zip(chunks, labels)):
+                            all_raw_tables.extend(chunk_tables)
 
         if not all_raw_tables:
             print('[LLM] No tables parsed from any page')
