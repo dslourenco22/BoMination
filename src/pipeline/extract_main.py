@@ -41,8 +41,12 @@ RULES:
 - Extract ONLY rows that are part of the BOM table — ignore page headers, footers, legal text, disclaimers, notes, signature blocks, revision history, and any text that appears outside the table boundaries
 - Include EVERY valid BOM data row — do not skip or summarize
 - Preserve the exact row order as they appear in the document — do not reorder, sort, or group rows
-- Use empty string "" for blank cells
-- Each row must have the same number of values as the headers list
+- BLANK CELLS: If a cell is blank or empty, use "" for that position. NEVER shift the remaining values left to fill the gap. Every row must have exactly the same number of values as the headers list, with "" in every blank position.
+- COMBINED FIELDS: If a column contains a combined value like "MANUFACTURER / PART_NUMBER", keep the full value intact as one string — do not split it across columns.
+
+BLANK CELL EXAMPLE — if headers are ["ITEM","QTY","PART NUMBER","MFG / PART NUMBER","DESCRIPTION"] and a row has no PART NUMBER:
+  CORRECT:   ["4", "5", "", "ALLEN BRADLEY / 700S-EFG20E3C", "Safety IEC Control Relay"]
+  INCORRECT: ["4", "5", "ALLEN BRADLEY / 700S-EFG20E3C", "Safety IEC Control Relay", ""]
 
 DOCUMENT TEXT:
 {text}
@@ -149,7 +153,7 @@ def call_local_ollama(prompt):
             model=MODEL,
             messages=[{'role': 'user', 'content': prompt}],
             format='json',
-            options={'temperature': 0, 'num_ctx': 8192, 'num_predict': 2048},
+            options={'temperature': 0, 'num_ctx': 8192, 'num_predict': 4096},
         )
         return response['message']['content']
     except Exception as e:
@@ -329,7 +333,10 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
                         f'Page {idx + 1}' if len(sub_pages) == 1
                         else f'Page {idx + 1} col {col_idx + 1}'
                     )
-                    page_text = sub_page.extract_text() or ''
+                    try:
+                        page_text = sub_page.extract_text(layout=True) or ''
+                    except TypeError:
+                        page_text = sub_page.extract_text() or ''
                     if not page_text.strip():
                         print(f'[LLM] {prefix}: no text, skipping')
                         continue

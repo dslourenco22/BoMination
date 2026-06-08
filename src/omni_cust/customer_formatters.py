@@ -61,10 +61,37 @@ def clean_farrell_columns(df):
             else:
                 mfr_vals = pd.Series([''] * len(df), index=df.index)
                 mpn_vals = raw.where(has_slash, other='')
+            # Strip any description text that bled into the MPN value.
+            # Real part numbers have no embedded spaces — everything after the
+            # first space is description spillover from an adjacent column.
+            def _clean_mpn(val):
+                val = str(val).strip()
+                # Take only the leading alphanumeric/hyphen/dot/slash token
+                m = re.match(r'^([\w\-\.\/]+)', val)
+                return m.group(1) if m else val
+
+            mpn_vals = mpn_vals.apply(_clean_mpn)
+
             df.insert(0, "Manufacturer", mfr_vals)
             df.insert(1, "MPN", mpn_vals)
             print("🔧 FARRELL DEBUG: ✅ Split MFG/PART into Manufacturer and MPN")
             df.drop(columns=[part_col], inplace=True)
+
+        # Fix LLM column-shift: if Internal Part Number looks like "MFG / MPN"
+        # the LLM slid the MFG/PART value left into the wrong column (blank PART NUMBER row).
+        if "Internal Part Number" in df.columns and "MPN" in df.columns:
+            shifted_mask = (
+                df["Internal Part Number"].str.contains(r'\s*/\s*', na=False, regex=True) &
+                (df["MPN"].fillna('').str.strip() == '')
+            )
+            if shifted_mask.any():
+                print(f"🔧 FARRELL DEBUG: Fixing {shifted_mask.sum()} column-shifted row(s)")
+                for i in df[shifted_mask].index:
+                    combined = str(df.at[i, "Internal Part Number"])
+                    parts = combined.split("/", 1)
+                    df.at[i, "Manufacturer"] = parts[0].strip()
+                    df.at[i, "MPN"]          = parts[1].strip() if len(parts) > 1 else ''
+                    df.at[i, "Internal Part Number"] = ''
 
         # Normalize QTY to pure numbers
         qty_col = next(
