@@ -375,6 +375,15 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
                 page = pdf.pages[idx]
 
                 # Split two-column pages at the PDF level before extracting text
+                # ── Primary: native table detection on the FULL page ──────
+                # Run BEFORE splitting so pdfplumber can find both side-by-side
+                # tables as separate objects (cropping cuts shared borders).
+                native = _extract_native_tables(page, f'Page {idx + 1}')
+                if native:
+                    all_raw_tables.extend(native)
+                    continue  # both columns captured — skip split + LLM
+
+                # ── Fallback: split + LLM ─────────────────────────────────
                 sub_pages = _split_two_column_page(page)
 
                 for col_idx, sub_page in enumerate(sub_pages):
@@ -382,16 +391,6 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
                         f'Page {idx + 1}' if len(sub_pages) == 1
                         else f'Page {idx + 1} col {col_idx + 1}'
                     )
-
-                    # ── Primary: pdfplumber native table detection ─────────
-                    # Handles multi-line cells (e.g. long descriptions) correctly
-                    # because it reads actual cell boundaries rather than raw text.
-                    native = _extract_native_tables(sub_page, prefix)
-                    if native:
-                        all_raw_tables.extend(native)
-                        continue   # skip LLM for this sub-page
-
-                    # ── Fallback: LLM extraction ───────────────────────────
                     try:
                         page_text = sub_page.extract_text(layout=True) or ''
                     except TypeError:
