@@ -51,12 +51,20 @@ def clean_farrell_columns(df):
                 break
         print(f"🔧 FARRELL DEBUG: Found MFG/PART column: {part_col}")
         if part_col and len(df) > 0:
-            split_cols = df[part_col].astype(str).str.split("/", n=1, expand=True)
+            raw = df[part_col].astype(str).str.strip()
+            # Only split rows that actually contain " / " — leave blanks/N/A intact
+            has_slash = raw.str.contains(r'\s*/\s*', regex=True)
+            split_cols = raw.where(has_slash, other='').str.split(r'\s*/\s*', n=1, expand=True)
             if split_cols.shape[1] == 2:
-                df.insert(0, "Manufacturer", split_cols[0].str.strip())
-                df.insert(1, "MPN", split_cols[1].str.strip())
-                print("🔧 FARRELL DEBUG: ✅ Split MFG/PART into Manufacturer and MPN")
-                df.drop(columns=[part_col], inplace=True)
+                mfr_vals = split_cols[0].str.strip().where(has_slash, other='')
+                mpn_vals = split_cols[1].str.strip().where(has_slash, other='')
+            else:
+                mfr_vals = pd.Series([''] * len(df), index=df.index)
+                mpn_vals = raw.where(has_slash, other='')
+            df.insert(0, "Manufacturer", mfr_vals)
+            df.insert(1, "MPN", mpn_vals)
+            print("🔧 FARRELL DEBUG: ✅ Split MFG/PART into Manufacturer and MPN")
+            df.drop(columns=[part_col], inplace=True)
 
         # Normalize QTY to pure numbers
         qty_col = next(

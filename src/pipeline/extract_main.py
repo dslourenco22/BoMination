@@ -37,6 +37,7 @@ If no BOM table is present return ONLY:
 
 RULES:
 - Use the EXACT column headers from the document — do not rename them
+- TWO-COLUMN LAYOUT: If the page has two BOM tables side-by-side with the same columns, treat them as ONE continuous table. Extract all rows from the LEFT side first, then all rows from the RIGHT side. Use the headers from the left side only.
 - Extract ONLY rows that are part of the BOM table — ignore page headers, footers, legal text, disclaimers, notes, signature blocks, revision history, and any text that appears outside the table boundaries
 - Include EVERY valid BOM data row — do not skip or summarize
 - Preserve the exact row order as they appear in the document — do not reorder, sort, or group rows
