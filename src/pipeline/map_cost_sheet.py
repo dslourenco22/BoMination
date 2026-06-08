@@ -408,6 +408,14 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
         elif "DESCRIPTION" in df_merged.columns:
             df_oem["DESCRIPTION"] = df_merged["DESCRIPTION"]
 
+        # Pull COMMENTS (e.g. "SUPPLIED BY FARREL") → SUPPLIER / NOTES
+        comments_candidates = ['COMMENTS', 'Comments', 'COMMENT', 'Comment']
+        for col in comments_candidates:
+            if col in df_merged.columns:
+                df_oem["COMMENTS"] = df_merged[col]
+                print(f"✅ Added COMMENTS from merged file column '{col}' (Farrell format)")
+                break
+
         column_mapping = {
             "ITEM": "ITEM",
             "Manufacturer": "MFR",
@@ -421,6 +429,7 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
             "Cost": "COST EACH",
             "Lead Time on Additional Stock in Weeks": "LEAD TIME (WEEKS)",
             "Notes": "SUPPLIER / NOTES",
+            "COMMENTS": "SUPPLIER / NOTES",
             "DESCRIPTION": "DESCRIPTION"
         }
 

@@ -214,10 +214,11 @@ def run_price_lookup(merged_path):
         print(result.stderr)
         raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout, stderr=result.stderr)
     
-    # Generate the expected output path for the file with prices - save to PDF directory
+    # Match the filename that lookup_price.py actually saves
     merged_path_obj = Path(merged_path)
-    prices_path = merged_path_obj.parent / f"{merged_path_obj.stem}_merged_with_prices.xlsx"
-    
+    base = merged_path_obj.stem.replace('_merged', '')
+    prices_path = merged_path_obj.parent / f'{base}_merged_with_prices.xlsx'
+
     print(f"SUCCESS: Expected prices file: {prices_path}")
     return prices_path
 
@@ -494,7 +495,8 @@ def run_main_pipeline_direct(pdf_path, pages, company, output_directory, tabula_
         # Generate the expected prices file path
         # IMPORTANT: Price lookup saves files to PDF directory, not output directory
         # The lookup_price.py saves files next to the input file (merged_path)
-        prices_path = os.path.splitext(merged_path)[0] + "_merged_with_prices.xlsx"
+        _mp = Path(merged_path)
+        prices_path = str(_mp.parent / f'{_mp.stem.replace("_merged", "")}_merged_with_prices.xlsx')
         
         print(f"Looking for prices file: {prices_path}")
         

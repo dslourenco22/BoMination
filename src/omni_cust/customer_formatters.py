@@ -74,16 +74,39 @@ def clean_farrell_columns(df):
             mpn_clean   = parsed.apply(lambda x: x[0])
             desc_overflow = parsed.apply(lambda x: x[1])
 
-            # Find the DESCRIPTION column and back-fill empty cells with overflow
-            desc_col = next(
-                (c for c in df.columns if 'DESC' in str(c).upper()), None
-            )
+            # Split overflow at "SUPPLIED BY" — description goes to DESCRIPTION,
+            # "SUPPLIED BY..." goes to the COMMENTS column (→ SUPPLIER/NOTES later)
+            def _split_at_supplied(val):
+                upper = val.upper()
+                if 'SUPPLIED BY' in upper:
+                    idx = upper.index('SUPPLIED BY')
+                    return val[:idx].strip(), val[idx:].strip()
+                if 'FURNISHED BY' in upper:
+                    idx = upper.index('FURNISHED BY')
+                    return val[:idx].strip(), val[idx:].strip()
+                return val, ''
+
+            overflow_parts = desc_overflow.apply(_split_at_supplied)
+            overflow_desc    = overflow_parts.apply(lambda x: x[0])
+            overflow_comment = overflow_parts.apply(lambda x: x[1])
+
+            desc_col = next((c for c in df.columns if 'DESC' in str(c).upper()), None)
             if desc_col is not None:
                 empty_mask = df[desc_col].fillna('').astype(str).str.strip() == ''
-                df.loc[empty_mask, desc_col] = desc_overflow[empty_mask].values
+                df.loc[empty_mask, desc_col] = overflow_desc[empty_mask].values
                 filled = empty_mask.sum()
                 if filled:
                     print(f"🔧 FARRELL DEBUG: Recovered descriptions for {filled} row(s) from MPN overflow")
+
+            # Route the "SUPPLIED BY" portion to COMMENTS if that column exists
+            comment_col = next((c for c in df.columns if 'COMMENT' in str(c).upper()), None)
+            if comment_col is not None:
+                empty_comment = df[comment_col].fillna('').astype(str).str.strip() == ''
+                has_comment   = overflow_comment.str.strip() != ''
+                fill_mask     = empty_comment & has_comment
+                if fill_mask.any():
+                    df.loc[fill_mask, comment_col] = overflow_comment[fill_mask].values
+                    print(f"🔧 FARRELL DEBUG: Moved 'SUPPLIED BY' text to COMMENTS for {fill_mask.sum()} row(s)")
 
             df.insert(0, "Manufacturer", mfr_vals)
             df.insert(1, "MPN", mpn_clean)

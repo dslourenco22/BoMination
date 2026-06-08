@@ -43,6 +43,7 @@ RULES:
 - Preserve the exact row order as they appear in the document — do not reorder, sort, or group rows
 - BLANK CELLS: If a cell is blank or empty, use "" for that position. NEVER shift the remaining values left to fill the gap. Every row must have exactly the same number of values as the headers list, with "" in every blank position.
 - COMBINED FIELDS: If a column contains a combined value like "MANUFACTURER / PART_NUMBER", keep the full value intact as one string — do not split it across columns.
+- MULTI-LINE CELLS: If a description or other value wraps onto the next line (with no new ITEM number), that continuation belongs to the current row — append it to that cell's value. Do not create a new row for wrapped text.
 
 BLANK CELL EXAMPLE — if headers are ["ITEM","QTY","PART NUMBER","MFG / PART NUMBER","DESCRIPTION"] and a row has no PART NUMBER:
   CORRECT:   ["4", "5", "", "ALLEN BRADLEY / 700S-EFG20E3C", "Safety IEC Control Relay"]
