@@ -37,7 +37,8 @@ If no BOM table is present return ONLY:
 
 RULES:
 - Use the EXACT column headers from the document — do not rename them
-- Include EVERY data row — do not skip or summarize
+- Extract ONLY rows that are part of the BOM table — ignore page headers, footers, legal text, disclaimers, notes, signature blocks, revision history, and any text that appears outside the table boundaries
+- Include EVERY valid BOM data row — do not skip or summarize
 - Preserve the exact row order as they appear in the document — do not reorder, sort, or group rows
 - Use empty string "" for blank cells
 - Each row must have the same number of values as the headers list
@@ -342,6 +343,27 @@ def clean_and_filter_tables(tables, method_name):
             ratio = non_empty / (rows * cols)
             if ratio < 0.1:
                 print(f'  [SKIP] Table {i + 1}: low content ratio ({ratio:.2f})')
+                continue
+
+            # Drop rows that look like footer/legal/disclaimer text rather than BOM data
+            junk_phrases = [
+                'INFORMATION CONTAINED', 'THIS DOCUMENT', 'CORPORATION',
+                'PROPRIETARY', 'CONFIDENTIAL', 'ALL RIGHTS RESERVED',
+                'DO NOT REPRODUCE', 'WITHOUT WRITTEN', 'REVISION HISTORY',
+                'DRAWING NO', 'APPROVED BY', 'CHECKED BY', 'DRAWN BY',
+            ]
+            def _is_junk_row(row):
+                combined = ' '.join(str(v) for v in row).upper()
+                # Long prose with no part-number-like token is likely junk
+                if len(combined) > 80 and not re.search(r'[A-Z0-9]{4,}[-/][A-Z0-9]', combined):
+                    return True
+                return any(phrase in combined for phrase in junk_phrases)
+
+            before = len(table)
+            table = table[~table.apply(_is_junk_row, axis=1)].reset_index(drop=True)
+            if len(table) < before:
+                print(f'  [FILTER] Table {i + 1}: removed {before - len(table)} junk row(s)')
+            if table.empty:
                 continue
 
             cleaned.append(table)

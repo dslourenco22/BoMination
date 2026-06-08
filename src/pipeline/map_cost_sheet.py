@@ -356,7 +356,13 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
         # Pull key columns from the merged (extracted) BOM file into df_oem.
         # The price-lookup output uses OEMSecrets column names, so MPN and QTY
         # from the original BOM must be grafted in — exactly like other customers.
-        mpn_candidates = ['MPN', 'Part Number', 'PART NUMBER', 'MODEL NO', 'Model No']
+        mpn_candidates = [
+            'MPN', 'Part Number', 'PART NUMBER', 'MODEL NO', 'Model No',
+            'CATALOG NUMBER', 'Catalog Number', 'CAT NO', 'Cat No', 'CAT #',
+            'ORDER CODE', 'Order Code', 'ORDER NO', 'Order No',
+            'ARTICLE NUMBER', 'Article Number', 'ARTICLE NO',
+            'PART NO', 'Part No', 'P/N', 'PN',
+        ]
         for col in mpn_candidates:
             if col in df_merged.columns:
                 df_oem["MPN"] = df_merged[col]
@@ -366,7 +372,7 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
             df_oem["MPN"] = ""
             print("⚠️ MPN column not found in merged file. Skipping part number.")
 
-        qty_candidates = ['QTY', 'Quantity', 'QUANTITY', 'Qty']
+        qty_candidates = ['QTY', 'Quantity', 'QUANTITY', 'Qty', 'QTY.', 'TOTAL QTY', 'AMOUNT']
         for col in qty_candidates:
             if col in df_merged.columns:
                 df_oem["QTY"] = df_merged[col]
@@ -375,16 +381,40 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
         else:
             print("⚠️ QTY column not found in merged file. Will use OEMSecrets quantity.")
 
-        if "ITEM" in df_merged.columns:
-            df_oem["ITEM"] = df_merged["ITEM"]
-            print("✅ Added ITEM column from merged file (Farrell format)")
+        mfr_candidates = ['Manufacturer', 'MFR', 'MANUFACTURER', 'MFG', 'BRAND', 'MAKE', 'VENDOR']
+        for col in mfr_candidates:
+            if col in df_merged.columns:
+                df_oem["Manufacturer"] = df_merged[col]
+                print(f"✅ Added Manufacturer from merged file column '{col}' (Farrell format)")
+                break
+
+        item_candidates = ['ITEM', 'Item', 'ITEM NO', 'Item No', 'LINE', 'LINE NO', 'SEQ', 'SEQ NO']
+        for col in item_candidates:
+            if col in df_merged.columns:
+                df_oem["ITEM"] = df_merged[col]
+                print(f"✅ Added ITEM from merged file column '{col}' (Farrell format)")
+                break
+
+        cust_pn_candidates = ['Internal Part Number', 'CUST PART', 'CUSTOMER PART', 'INTERNAL P/N',
+                               'INTERNAL PART', 'CUSTOMER P/N', 'CUST P/N', 'CUST PN']
+        for col in cust_pn_candidates:
+            if col in df_merged.columns:
+                df_oem["CUST PART #"] = df_merged[col]
+                print(f"✅ Added CUST PART # from merged file column '{col}' (Farrell format)")
+                break
+
+        if "Description" in df_merged.columns:
+            df_oem["DESCRIPTION"] = df_merged["Description"]
+        elif "DESCRIPTION" in df_merged.columns:
+            df_oem["DESCRIPTION"] = df_merged["DESCRIPTION"]
 
         column_mapping = {
             "ITEM": "ITEM",
             "Manufacturer": "MFR",
-            "MPN": "COMMERCIAL PART#",          # pulled from merged above
-            "QTY": "UNIT QTY",                  # pulled from merged above
-            "Quantity for Single BOM": "UNIT QTY",  # OEMSecrets fallback
+            "MPN": "COMMERCIAL PART#",
+            "CUST PART #": "CUST PART #",
+            "QTY": "UNIT QTY",
+            "Quantity for Single BOM": "UNIT QTY",
             "Unit Price in USD": "COST EACH",
             "Unit Price": "COST EACH",
             "Price": "COST EACH",
