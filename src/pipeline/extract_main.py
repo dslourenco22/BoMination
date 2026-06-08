@@ -266,6 +266,54 @@ def _split_two_column_page(pdf_page):
         return [pdf_page]
 
 
+def _extract_native_tables(pdf_page, label=''):
+    """
+    Use pdfplumber's built-in table detection as the primary extraction path.
+    Handles multi-line cells correctly because it reads cell boundaries rather
+    than raw text. Falls back gracefully by returning [] when no table is found.
+    """
+    try:
+        raw_tables = pdf_page.extract_tables()
+        if not raw_tables:
+            return []
+
+        results = []
+        for t in raw_tables:
+            if not t or len(t) < 2:
+                continue
+
+            # First row is the header
+            headers = [str(h or '').strip() for h in t[0]]
+            if sum(1 for h in headers if h) < 2:
+                continue  # Not enough header columns — not a real table
+
+            # Check that the headers look like BOM columns
+            combined_headers = ' '.join(headers).upper()
+            bom_kw = ['ITEM', 'QTY', 'PART', 'MFG', 'DESCRIPTION']
+            if sum(1 for kw in bom_kw if kw in combined_headers) < 2:
+                continue  # Doesn't look like a BOM table
+
+            rows = []
+            for row in t[1:]:
+                # Normalize each cell: join multi-line content, strip whitespace
+                clean = [' '.join(str(c or '').split()) for c in row]
+                if any(v for v in clean):  # skip all-blank rows
+                    rows.append(clean)
+
+            if not rows:
+                continue
+
+            df = pd.DataFrame(rows, columns=headers)
+            df = df.fillna('').astype(str).replace('nan', '').replace('None', '')
+            results.append(df)
+            print(f'[NATIVE] {label}: extracted {len(df)} rows via pdfplumber table detection')
+
+        return results
+    except Exception as e:
+        print(f'[NATIVE] {label}: table detection failed ({e}), falling back to LLM')
+        return []
+
+
 def _split_into_chunks(text, chunk_size=10000, overlap=500):
     """Split text into overlapping chunks snapped to newline boundaries. (LD)"""
     if len(text) <= chunk_size:
@@ -334,6 +382,16 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
                         f'Page {idx + 1}' if len(sub_pages) == 1
                         else f'Page {idx + 1} col {col_idx + 1}'
                     )
+
+                    # ── Primary: pdfplumber native table detection ─────────
+                    # Handles multi-line cells (e.g. long descriptions) correctly
+                    # because it reads actual cell boundaries rather than raw text.
+                    native = _extract_native_tables(sub_page, prefix)
+                    if native:
+                        all_raw_tables.extend(native)
+                        continue   # skip LLM for this sub-page
+
+                    # ── Fallback: LLM extraction ───────────────────────────
                     try:
                         page_text = sub_page.extract_text(layout=True) or ''
                     except TypeError:

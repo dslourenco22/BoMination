@@ -101,6 +101,47 @@ def _find_mfr_col(df):
     return None
 
 
+def _fetch_distributor_price(part_number, manufacturer=''):
+    """
+    Direct HTTP request to Grainger — renders prices in initial HTML without JS.
+    Returns a float price or None.
+    """
+    try:
+        import requests
+        from urllib.parse import quote
+
+        skip = {'', 'n/a', 'nan', 'none', 'generic'}
+        q = f'{manufacturer} {part_number}'.strip() if manufacturer.lower() not in skip else part_number
+        url = f'https://www.grainger.com/search?searchQuery={quote(q)}'
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        r = requests.get(url, headers=headers, timeout=12)
+
+        if r.status_code != 200:
+            return None
+
+        html = r.text
+        # Grainger embeds prices in JSON-LD and data attributes
+        patterns = [
+            r'"price"[:\s]*"?([\d,]+\.\d{2})"?',         # JSON-LD "price":"4.87"
+            r'data-unit-price=["\']?([\d,]+\.\d{2})',      # data attribute
+            r'\$\s*([\d,]+\.\d{2})\s*(?:each|\/ea)',       # $4.87 each
+            r'"unitPrice"[:\s]*([\d,]+\.\d{2})',            # unitPrice JSON field
+        ]
+        found = []
+        for pat in patterns:
+            for m in re.findall(pat, html, re.IGNORECASE):
+                try:
+                    v = float(m.replace(',', ''))
+                    if 0 < v < 1_000_000:
+                        found.append(v)
+                except ValueError:
+                    pass
+        return min(found) if found else None
+    except Exception as e:
+        print(f'  [GRAINGER] Request failed: {type(e).__name__}: {e}')
+        return None
+
+
 def _extract_price_regex(text):
     """
     Fast regex price extraction — tries common price patterns before Ollama. (LD)
@@ -277,11 +318,19 @@ def lookup_prices_for_bom(df):
                 except (ValueError, TypeError):
                     out_row['Unit Price in USD'] = ''
                 if out_row['Unit Price in USD'] == '':
-                    print(f'  [MISS] No price found for {label}')
+                    print(f'  [MISS] Ollama found nothing for {label}')
                 else:
                     print(f'  [OLLAMA] Found price ${out_row["Unit Price in USD"]:.2f} for {label}')
         else:
-            print(f'  [SKIP] No search results for {label}')
+            print(f'  [SKIP] No DDG results for {label}')
+
+        # ── Last resort: direct Grainger page fetch ────────────────────────
+        if out_row['Unit Price in USD'] in ('', 0, 0.0, None):
+            g_price = _fetch_distributor_price(pn, mfr)
+            if g_price is not None:
+                out_row['Unit Price in USD'] = g_price
+                out_row['Distributor'] = 'Grainger'
+                print(f'  [GRAINGER] Found price ${g_price:.2f} for {label}')
 
         rows_out.append(out_row)
         time.sleep(SEARCH_DELAY)
