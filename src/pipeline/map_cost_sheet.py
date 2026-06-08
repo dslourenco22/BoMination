@@ -427,6 +427,7 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
             "Unit Price": "COST EACH",
             "Price": "COST EACH",
             "Cost": "COST EACH",
+            "Minimum Order": "MIN BUY",
             "Lead Time on Additional Stock in Weeks": "LEAD TIME (WEEKS)",
             "Notes": "SUPPLIER / NOTES",
             "COMMENTS": "SUPPLIER / NOTES",
@@ -454,10 +455,13 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
     
     # Apply the clean mapping
     df_renamed = df_oem.rename(columns=clean_mapping)
-    
+
     # Get all the target column names we want to keep
+    # Always include COST EACH even if price mapping was deduped away
     mapped_target_columns = list(clean_mapping.values())
-    df_out = df_renamed[mapped_target_columns].copy()
+    if "COST EACH" not in mapped_target_columns and "COST EACH" in df_renamed.columns:
+        mapped_target_columns.append("COST EACH")
+    df_out = df_renamed[[c for c in mapped_target_columns if c in df_renamed.columns]].copy()
     
     print(f"📊 df_out shape after selection: {df_out.shape}")
     print(f"📊 df_out columns: {list(df_out.columns)}")
@@ -474,6 +478,25 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
             # For other columns, replace NaN with "N/A"
             df_out[col] = df_out[col].fillna("N/A")
             df_out[col] = df_out[col].replace("", "N/A")
+
+    # ── TOTAL QTY = UNIT QTY for single-BOM quotes ─────────────────────────────
+    if "UNIT QTY" in df_out.columns and "TOTAL QTY" not in df_out.columns:
+        df_out["TOTAL QTY"] = df_out["UNIT QTY"]
+
+    # ── Direct price injection ──────────────────────────────────────────────────
+    # Bypass the column-mapping pipeline for COST EACH — read the price directly
+    # from the prices file so it can never be silently dropped by deduplication.
+    if "Unit Price in USD" in df_oem.columns:
+        raw_prices = pd.to_numeric(df_oem["Unit Price in USD"], errors='coerce')
+        non_zero = (raw_prices > 0).sum()
+        print(f"💰 Direct price injection: {non_zero}/{len(raw_prices)} non-zero prices")
+        if "COST EACH" not in df_out.columns:
+            df_out["COST EACH"] = raw_prices.fillna(0).values
+        else:
+            # Overwrite whatever mapping produced — real prices win
+            df_out["COST EACH"] = raw_prices.fillna(df_out["COST EACH"]).values
+    else:
+        print("⚠️ Unit Price in USD not found in price file — COST EACH will be 0")
 
     # Add ITEM numbers (sequential numbering)
     if "ITEM" not in df_out.columns:
