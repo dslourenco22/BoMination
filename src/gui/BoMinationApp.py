@@ -377,6 +377,15 @@ class BoMApp:
         # Live price lookup toggle (ON = web search + AI estimate; OFF = blank prices)
         self.enable_prices = tk.BooleanVar(value=True)
 
+        # Cost sheet output: custom file name and destination folder
+        self.cost_sheet_name = tk.StringVar()  # e.g. "Main Panel Cost Sheet.xlsx"
+
+        # Batch processing: list of selected PDFs (one cost sheet each)
+        self.selected_pdfs = []
+
+        # Auto-detect BOM pages (skip manual page range entry)
+        self.auto_detect_pages = tk.BooleanVar(value=True)
+
         # Progress components
         self.progress_var = tk.StringVar(value="Ready to process your BoM files")
         self.progress_bar = None
@@ -424,59 +433,80 @@ class BoMApp:
         )
         subtitle_label.pack(pady=(0, 30))
         
-        # Step 1: PDF File Selection
-        pdf_frame = ttk.LabelFrame(main_container_padded, text="Step 1: Select BoM PDF File", padding=15)
+        # Step 1: PDF File Selection (one or many)
+        pdf_frame = ttk.LabelFrame(main_container_padded, text="Step 1: Select BoM PDF File(s)", padding=15)
         pdf_frame.pack(fill=X, pady=(0, 15))
-        
+
         pdf_entry_frame = ttk.Frame(pdf_frame)
         pdf_entry_frame.pack(fill=X, pady=5)
-        
+
         ttk.Entry(
-            pdf_entry_frame, 
-            textvariable=self.pdf_path, 
+            pdf_entry_frame,
+            textvariable=self.pdf_path,
             font=("Segoe UI", 10),
             width=50
         ).pack(side=LEFT, fill=X, expand=True, padx=(0, 10))
-        
+
         ttk.Button(
-            pdf_entry_frame, 
-            text="Browse", 
+            pdf_entry_frame,
+            text="Browse",
             command=self.browse_pdf,
             bootstyle="outline-primary",
             width=10
         ).pack(side=RIGHT)
-        
-        # Step 2: Page Range
-        page_frame = ttk.LabelFrame(main_container_padded, text="Step 2: Enter Page Range", padding=15)
+
+        ttk.Label(
+            pdf_frame,
+            text="Select multiple PDFs to batch-process — each produces its own cost sheet.",
+            font=("Segoe UI", 9),
+            bootstyle="secondary"
+        ).pack(anchor=W, pady=(5, 0))
+
+        # Step 2: Page Range (optional when auto-detect is on)
+        page_frame = ttk.LabelFrame(main_container_padded, text="Step 2: BOM Pages", padding=15)
         page_frame.pack(fill=X, pady=(0, 15))
-        
+
+        # Auto-detect toggle
+        ttk.Checkbutton(
+            page_frame,
+            text="Auto-detect BOM pages",
+            variable=self.auto_detect_pages,
+            bootstyle="success-round-toggle",
+            command=self.on_auto_pages_toggle
+        ).pack(anchor=W, pady=(0, 8))
+
         page_entry_frame = ttk.Frame(page_frame)
         page_entry_frame.pack(fill=X, pady=5)
-        
-        ttk.Entry(
-            page_entry_frame, 
-            textvariable=self.page_range, 
+
+        self.page_entry = ttk.Entry(
+            page_entry_frame,
+            textvariable=self.page_range,
             font=("Segoe UI", 10),
             width=20
-        ).pack(side=LEFT, padx=(0, 10))
-        
+        )
+        self.page_entry.pack(side=LEFT, padx=(0, 10))
+
         # Help button with modern styling
         ttk.Button(
-            page_entry_frame, 
-            text="Help", 
+            page_entry_frame,
+            text="Help",
             command=self.show_page_range_help,
             bootstyle="outline-info",
             width=8
         ).pack(side=RIGHT)
-        
+
         # Examples label with better styling
         examples_label = ttk.Label(
-            page_frame, 
-            text="Examples: 1-3 (pages 1 to 3), 5 (page 5), 2,4,6 (pages 2, 4, and 6)", 
+            page_frame,
+            text="Examples: 1-3 (pages 1 to 3), 5 (page 5), 2,4,6 (pages 2, 4, and 6)",
             font=("Segoe UI", 9),
             bootstyle="secondary"
         )
         examples_label.pack(anchor=W, pady=(5, 0))
+
+        # Reflect the initial auto-detect state on the entry
+        if self.auto_detect_pages.get():
+            self.page_entry.configure(state="disabled")
 
         # Step 3: Company Selection
         company_frame = ttk.LabelFrame(main_container_padded, text="Step 3: Select Company (Optional)", padding=15)
@@ -525,6 +555,45 @@ class BoMApp:
             justify="left"
         )
         self.price_info_label.pack(anchor=W, pady=(5, 0))
+
+        # Step 5: Output (cost sheet file name + destination folder)
+        output_frame = ttk.LabelFrame(main_container_padded, text="Step 5: Output Cost Sheet", padding=15)
+        output_frame.pack(fill=X, pady=(0, 15))
+
+        # File name row
+        name_row = ttk.Frame(output_frame)
+        name_row.pack(fill=X, pady=5)
+        ttk.Label(name_row, text="File name:", font=("Segoe UI", 10), width=12).pack(side=LEFT)
+        ttk.Entry(
+            name_row,
+            textvariable=self.cost_sheet_name,
+            font=("Segoe UI", 10)
+        ).pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+        ttk.Label(name_row, text=".xlsx", font=("Segoe UI", 10), bootstyle="secondary").pack(side=LEFT)
+
+        # Destination folder row (reuses self.output_directory)
+        dir_row = ttk.Frame(output_frame)
+        dir_row.pack(fill=X, pady=5)
+        ttk.Label(dir_row, text="Save to:", font=("Segoe UI", 10), width=12).pack(side=LEFT)
+        ttk.Entry(
+            dir_row,
+            textvariable=self.output_directory,
+            font=("Segoe UI", 10)
+        ).pack(side=LEFT, fill=X, expand=True, padx=(0, 10))
+        ttk.Button(
+            dir_row,
+            text="Browse",
+            command=self.browse_output_dir,
+            bootstyle="outline-primary",
+            width=10
+        ).pack(side=RIGHT)
+
+        ttk.Label(
+            output_frame,
+            text="Only the cost sheet is saved. Leave blank to use the PDF's name and folder.",
+            font=("Segoe UI", 9),
+            bootstyle="secondary"
+        ).pack(anchor=W, pady=(5, 0))
 
         # Action buttons frame
         button_frame = ttk.Frame(main_container_padded)
@@ -691,10 +760,33 @@ Invalid formats:
         messagebox.showinfo("Page Range Help", help_text.strip())
 
     def browse_pdf(self):
-        file_path = filedialog.askopenfilename(filetypes=[("PDF Files", "*.pdf")])
-        if file_path:
-            self.pdf_path.set(file_path)
-            self.add_log_message(f"Selected PDF: {Path(file_path).name}", "info")
+        paths = filedialog.askopenfilenames(filetypes=[("PDF Files", "*.pdf")])
+        if paths:
+            self.selected_pdfs = list(paths)
+            if len(paths) == 1:
+                self.pdf_path.set(paths[0])
+                # Pre-fill a sensible default cost-sheet name from the PDF name
+                if not self.cost_sheet_name.get().strip():
+                    self.cost_sheet_name.set(f"{Path(paths[0]).stem}_cost_sheet")
+            else:
+                self.pdf_path.set(f"{len(paths)} PDFs selected")
+            self.add_log_message(f"Selected {len(paths)} PDF(s)", "info")
+
+    def on_auto_pages_toggle(self):
+        """Enable/disable the manual page-range entry based on the auto toggle."""
+        if self.auto_detect_pages.get():
+            self.page_entry.configure(state="disabled")
+            self.add_log_message("Auto-detect BOM pages enabled", "info")
+        else:
+            self.page_entry.configure(state="normal")
+            self.add_log_message("Manual page range enabled", "info")
+
+    def browse_output_dir(self):
+        """Choose the folder where the cost sheet will be saved."""
+        directory = filedialog.askdirectory()
+        if directory:
+            self.output_directory.set(directory)
+            self.add_log_message(f"Output folder: {directory}", "info")
 
     def on_price_toggle(self):
         """Update the helper text and log when the price lookup toggle changes."""
@@ -717,18 +809,28 @@ Invalid formats:
         pages = self.page_range.get()
         company = self.company_name.get()
         output_dir = self.output_directory.get()
+        auto_pages = self.auto_detect_pages.get()
 
-        # Step 1: Validate PDF file
-        pdf_valid, pdf_error = validate_pdf_file(pdf)
-        if not pdf_valid:
-            Messagebox.show_error("Invalid PDF File", pdf_error, parent=self.root)
+        # Build the list of PDFs to process (batch-aware). Fall back to a single
+        # path typed into the entry if Browse wasn't used.
+        pdfs = self.selected_pdfs if self.selected_pdfs else ([pdf] if pdf.strip() else [])
+        if not pdfs:
+            Messagebox.show_error("No PDF Selected", "Please select at least one PDF file.", parent=self.root)
             return
 
-        # Step 2: Validate page range
-        pages_valid, pages_error, parsed_ranges = validate_page_range(pages)
-        if not pages_valid:
-            Messagebox.show_error("Invalid Page Range", pages_error, parent=self.root)
-            return
+        # Step 1: Validate every PDF file
+        for p in pdfs:
+            pdf_valid, pdf_error = validate_pdf_file(p)
+            if not pdf_valid:
+                Messagebox.show_error("Invalid PDF File", f"{Path(p).name}: {pdf_error}", parent=self.root)
+                return
+
+        # Step 2: Validate page range (only when not auto-detecting)
+        if not auto_pages:
+            pages_valid, pages_error, parsed_ranges = validate_page_range(pages)
+            if not pages_valid:
+                Messagebox.show_error("Invalid Page Range", pages_error, parent=self.root)
+                return
 
         # Step 3: Validate output directory
         output_valid, output_error = validate_output_directory(output_dir)
@@ -746,8 +848,9 @@ Invalid formats:
             self.add_log_message(f"Cost sheet template not found: {COST_SHEET_TEMPLATE}", "warning")
 
         # Step 5: Handle ROI selection BEFORE starting background thread
+        # ROI is single-file + manual-pages only; skip it for batch / auto-detect.
         roi_areas = None
-        if self.use_roi.get():
+        if self.use_roi.get() and len(pdfs) == 1 and not auto_pages:
             self.add_log_message("ROI mode enabled - showing table area selection", "step")
             self.add_log_message(f"🐛 DEBUG: About to call show_roi_picker with PDF: {pdf}, pages: {pages}", "info")
             self.update_status("⏳ Waiting for user to select table areas...")
@@ -801,10 +904,9 @@ Invalid formats:
 
         # Log the start of pipeline
         self.add_log_message("Starting BoM processing pipeline...", "step")
-        self.add_log_message(f"PDF: {Path(pdf).name}", "info")
-        self.add_log_message(f"Pages: {pages}", "info")
+        self.add_log_message(f"Files: {len(pdfs)}", "info")
+        self.add_log_message(f"Pages: {'auto-detect' if auto_pages else pages}", "info")
         self.add_log_message(f"Table detection mode: {self.tabula_mode.get()}", "info")
-        self.add_log_message(f"Use ROI selection: {self.use_roi.get()}", "info")
         if company:
             self.add_log_message(f"Company: {company}", "info")
         if output_dir:
@@ -812,12 +914,11 @@ Invalid formats:
 
         def background_task():
             try:
-                # Start progress indication
                 self.start_progress("Initializing LLM extraction pipeline...")
-                
-                # Create detailed error log for debugging
-                error_log_path = Path(pdf).parent / "bomination_error_log.txt"
-                
+
+                # Detailed error log lives next to the first PDF
+                error_log_path = Path(pdfs[0]).parent / "bomination_error_log.txt"
+
                 def log_to_file(message):
                     """Log message to both console and file for debugging."""
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -828,157 +929,160 @@ Invalid formats:
                     except:
                         pass
                     print(log_entry)
-                
+
+                total = len(pdfs)
                 log_to_file("=== BoMination LLM Pipeline Started ===")
-                log_to_file(f"PDF: {pdf}")
-                log_to_file(f"Pages: {pages}")
-                log_to_file(f"Company: {company}")
-                
-                self.add_log_message("Starting LLM-based table extraction...", "step")
-                log_to_file("Starting LLM-based table extraction...")
-                
-                # Step 1: LLM-based table extraction (LD)
-                self.start_progress("Extracting tables using local LLM engine...")
-                
+                log_to_file(f"Files: {total} | Auto-detect pages: {auto_pages} | Company: {company}")
+
+                # Import pipeline pieces once
                 try:
                     from pipeline.main_pipeline import run_extract_bom_with_llm
-                    log_to_file("LLM extraction module imported successfully")
+                    from pipeline.map_cost_sheet import main as map_main
+                    from pipeline.extract_main import detect_bom_pages
+                    from pipeline.lookup_price import main as lookup_main, _build_empty_output
+                    import pandas as pd
+                    log_to_file("Pipeline modules imported successfully")
                 except Exception as import_error:
-                    error_msg = f"Failed to import LLM extraction module: {import_error}"
+                    error_msg = f"Failed to import pipeline modules: {import_error}"
                     log_to_file(f"CRITICAL: {error_msg}")
                     self.add_log_message(error_msg, "error")
                     raise Exception(f"Import Error: {error_msg}")
-                
-                # Execute LLM extraction (LD)
-                self.add_log_message("Triggering local LLM semantic parsing engine...", "step")
-                log_to_file("Executing LLM table extraction...")
-                
-                merged_path = run_extract_bom_with_llm(
-                    pdf_path=pdf,
-                    pages=pages,
-                    company=company
-                )
-                
-                log_to_file(f"LLM extraction completed: {merged_path}")
-                self.add_log_message("LLM extraction completed successfully!", "success")
-                
-                # Step 2: Price lookup (LD) — gated by the "Enable Live Price Lookup" toggle
-                # Compute the path that lookup_price.py will write to
-                _mp   = Path(str(merged_path))
-                _base = _mp.stem.replace('_merged', '')
-                prices_path = _mp.parent / f'{_base}_merged_with_prices.xlsx'
 
-                if self.enable_prices.get():
-                    self.start_progress("Running price lookup...")
-                    self.add_log_message("Step 2: Looking up supplier prices...", "step")
-                    log_to_file("Starting price lookup...")
+                saved_sheets = []   # (source_pdf_name, saved_path)
+                failures = []       # (source_pdf_name, error_str)
 
+                for idx, current_pdf in enumerate(pdfs, start=1):
+                    pdf_name = Path(current_pdf).name
+                    label = f"[{idx}/{total}] {pdf_name}"
+                    self.add_log_message(f"Processing {label}", "step")
+                    log_to_file(f"--- {label} ---")
                     try:
-                        from pipeline.lookup_price import main as lookup_main
-                        os.environ["BOM_EXCEL_PATH"] = str(merged_path)
-                        lookup_main()
-                        log_to_file("Price lookup completed")
-                        self.add_log_message("Price lookup completed", "success")
-                    except Exception as lookup_error:
-                        log_to_file(f"Price lookup failed: {lookup_error}")
-                        self.add_log_message(f"Price lookup failed (continuing anyway): {lookup_error}", "warning")
+                        # Resolve the page range for this file (auto or manual)
+                        if auto_pages:
+                            self.start_progress(f"{label}: detecting BOM pages...")
+                            rng, _detected = detect_bom_pages(current_pdf)
+                            rng = rng or "all"
+                            log_to_file(f"Auto-detected pages: {rng}")
+                            self.add_log_message(f"Auto-detected pages: {rng}", "info")
+                        else:
+                            rng = pages
 
-                    # Fall back to merged file if price lookup did not produce output
-                    if not prices_path.exists():
-                        prices_path = _mp
-                else:
-                    # Toggle OFF: skip all web requests, write a blank-price file
-                    # in the OEMSecrets schema so the cost sheet mapper still runs.
-                    self.start_progress("Skipping price lookup (disabled)...")
-                    self.add_log_message("Step 2: Price lookup disabled - generating blank prices", "step")
-                    log_to_file("Price lookup skipped (toggle off)")
+                        # Step 1: LLM extraction
+                        self.start_progress(f"{label}: extracting tables (LLM)...")
+                        merged_path = run_extract_bom_with_llm(
+                            pdf_path=current_pdf, pages=rng, company=company
+                        )
+                        log_to_file(f"Extraction completed: {merged_path}")
 
-                    try:
-                        import pandas as pd
-                        from pipeline.lookup_price import _build_empty_output
-                        df_merged = pd.read_excel(str(merged_path), keep_default_na=False, na_values=[''])
-                        df_blank = _build_empty_output(df_merged)
-                        df_blank.to_excel(str(prices_path), index=False)
-                        log_to_file(f"Blank-price file written: {prices_path}")
-                        self.add_log_message("Blank price file generated", "success")
-                    except Exception as blank_error:
-                        log_to_file(f"Blank-price generation failed: {blank_error}")
-                        self.add_log_message(f"Blank-price generation failed: {blank_error}", "warning")
-                        # Fall back to merged file so mapping can still proceed
-                        if not prices_path.exists():
-                            prices_path = _mp
+                        # Step 2: Price lookup (gated by toggle)
+                        _mp = Path(str(merged_path))
+                        _base = _mp.stem.replace('_merged', '')
+                        prices_path = _mp.parent / f'{_base}_merged_with_prices.xlsx'
 
-                # Step 3: Cost sheet mapping (LD)
-                self.start_progress("Mapping to cost sheet template...")
-                self.add_log_message("Step 3: Mapping to OMNI cost sheet template...", "step")
-                log_to_file("Starting cost sheet mapping...")
+                        if self.enable_prices.get():
+                            self.start_progress(f"{label}: looking up prices...")
+                            try:
+                                os.environ["BOM_EXCEL_PATH"] = str(merged_path)
+                                lookup_main()
+                            except Exception as lookup_error:
+                                log_to_file(f"Price lookup failed: {lookup_error}")
+                            if not prices_path.exists():
+                                prices_path = _mp
+                        else:
+                            self.start_progress(f"{label}: skipping prices...")
+                            try:
+                                df_merged = pd.read_excel(str(merged_path), keep_default_na=False, na_values=[''])
+                                _build_empty_output(df_merged).to_excel(str(prices_path), index=False)
+                            except Exception as blank_error:
+                                log_to_file(f"Blank-price generation failed: {blank_error}")
+                                if not prices_path.exists():
+                                    prices_path = _mp
 
-                try:
-                    from pipeline.map_cost_sheet import main as map_main
-                    os.environ["OEM_INPUT_PATH"] = str(prices_path)   # priced file, not merged
-                    os.environ["MERGED_BOM_PATH"] = str(merged_path)
-                    os.environ["BOM_COMPANY"] = str(company)
-                    map_main()
-                    log_to_file("Cost sheet mapping completed")
-                    self.add_log_message("Cost sheet mapping completed", "success")
-                except Exception as map_error:
-                    log_to_file(f"Cost sheet mapping failed: {map_error}")
-                    self.add_log_message(f"Cost sheet mapping failed: {map_error}", "warning")
-                
-                log_to_file("=== Pipeline Completed Successfully ===")
-                self.add_log_message("LLM pipeline completed successfully!", "success")
-                
-                # Update progress to show completion
-                self.start_progress("Pipeline completed successfully!")
+                        # Step 3: Cost sheet
+                        self.start_progress(f"{label}: building cost sheet...")
+                        os.environ["OEM_INPUT_PATH"] = str(prices_path)
+                        os.environ["MERGED_BOM_PATH"] = str(merged_path)
+                        os.environ["BOM_COMPANY"] = str(company)
+                        os.environ["BOM_COST_SHEET_DIR"] = (output_dir or "").strip()
+                        # Honour a custom name only for a single file; batch uses per-file defaults
+                        if total == 1:
+                            _name = self.cost_sheet_name.get().strip()
+                            if _name and not _name.lower().endswith(".xlsx"):
+                                _name += ".xlsx"
+                            os.environ["BOM_COST_SHEET_NAME"] = _name
+                        else:
+                            os.environ["BOM_COST_SHEET_NAME"] = ""
+                        cost_sheet_saved = map_main()
+                        log_to_file(f"Cost sheet saved: {cost_sheet_saved}")
+
+                        # Clean up this file's intermediates — only the cost sheet is kept
+                        pdf_dir = Path(current_pdf).parent
+                        stem = Path(current_pdf).stem
+                        intermediates = {
+                            pdf_dir / f"{stem}_extracted.xlsx",
+                            pdf_dir / f"{stem}_merged.xlsx",
+                            Path(str(merged_path)),
+                            Path(str(prices_path)),
+                        }
+                        saved_resolved = Path(cost_sheet_saved).resolve() if cost_sheet_saved else None
+                        for f in intermediates:
+                            try:
+                                if f.exists() and (saved_resolved is None or f.resolve() != saved_resolved):
+                                    f.unlink()
+                            except Exception as del_err:
+                                log_to_file(f"Could not remove intermediate {f}: {del_err}")
+
+                        if cost_sheet_saved and Path(cost_sheet_saved).exists():
+                            saved_sheets.append((pdf_name, cost_sheet_saved))
+                            self.add_log_message(f"{label}: cost sheet ready", "success")
+                        else:
+                            failures.append((pdf_name, "cost sheet not produced"))
+                            self.add_log_message(f"{label}: cost sheet not produced", "warning")
+
+                    except Exception as file_error:
+                        log_to_file(f"{label} FAILED: {file_error}")
+                        self.add_log_message(f"{label} failed: {file_error}", "error")
+                        failures.append((pdf_name, str(file_error)))
+
+                log_to_file("=== Batch Completed ===")
+                self.stop_progress("Done")
                 self.complete_progress()
-                
-                # Stop progress and show success
-                self.stop_progress("Pipeline completed successfully!")
-                self.add_log_message("BoM processing pipeline completed successfully!", "success")
-                
-                # Look for output files in the PDF directory
-                pdf_dir = Path(pdf).parent
-                pdf_name = Path(pdf).stem
-                
-                # Expected output files
-                expected_files = [
-                    f"{pdf_name}_extracted.xlsx",
-                    f"{pdf_name}_merged.xlsx", 
-                    f"{pdf_name}_merged_with_prices.xlsx",
-                    f"{pdf_name}_cost_sheet.xlsx"
-                ]
-                
-                found_files = []
-                for filename in expected_files:
-                    file_path = pdf_dir / filename
-                    if file_path.exists():
-                        found_files.append(str(file_path))
-                        self.add_log_message(f"Output file: {filename}", "success")
-                
-                if found_files:
-                    files_text = "\n".join([f"• {Path(f).name}" for f in found_files])
-                    success_message = f"LLM Pipeline completed successfully!\n\nOutput files created:\n{files_text}\n\nLocation: {pdf_dir}\n\nDetailed log saved to: {error_log_path}"
+
+                # Build a summary dialog
+                n_ok = len(saved_sheets)
+                created = "\n".join(f"• {Path(p).name}" for _, p in saved_sheets)
+                failed = "\n".join(f"• {name}: {err}" for name, err in failures)
+                where = Path(saved_sheets[0][1]).parent if saved_sheets else (output_dir or Path(pdfs[0]).parent)
+                if n_ok and not failures:
+                    success_message = (
+                        f"{n_ok} cost sheet{'s' if n_ok != 1 else ''} created successfully!\n\n"
+                        f"{created}\n\nLocation: {where}\n\nDetailed log: {error_log_path}"
+                    )
+                elif n_ok and failures:
+                    success_message = (
+                        f"Finished with issues — {n_ok}/{total} succeeded.\n\n"
+                        f"Created:\n{created}\n\nFailed:\n{failed}\n\n"
+                        f"Location: {where}\n\nDetailed log: {error_log_path}"
+                    )
                 else:
-                    success_message = f"LLM Pipeline completed successfully!\n\nCheck the output folder for your processed files.\n\nDetailed log saved to: {error_log_path}"
-                
-                # Schedule the success dialog on the main thread
+                    success_message = (
+                        "No cost sheets were produced.\n\n"
+                        f"Failed:\n{failed}\n\nDetailed log: {error_log_path}"
+                    )
+
                 def show_success():
                     try:
-                        Messagebox.show_info(
-                            "Success", 
-                            success_message,
-                            parent=self.root
-                        )
+                        Messagebox.show_info("Done", success_message, parent=self.root)
                     except Exception as gui_error:
                         print(f"Could not show success dialog: {gui_error}")
                         print(f"SUCCESS: {success_message}")
-                
+
                 try:
                     self.root.after(0, show_success)
                 except RuntimeError as e:
                     print(f"Could not schedule success dialog: {e}")
                     print(f"SUCCESS: {success_message}")
-                
+
             except RuntimeError as runtime_error:
                 # Handle dependency errors specifically
                 error_message = str(runtime_error)

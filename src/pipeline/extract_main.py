@@ -103,6 +103,73 @@ def detect_pdf_type(pdf_path):
         return 'text'
 
 
+def _pages_to_range(pages):
+    """Convert a list of 1-based page numbers into a compact range string.
+    e.g. [2, 3, 5] -> '2-3,5'. Returns '' for an empty list."""
+    pages = sorted(set(int(p) for p in pages))
+    if not pages:
+        return ''
+    parts, start, prev = [], pages[0], pages[0]
+    for p in pages[1:]:
+        if p == prev + 1:
+            prev = p
+        else:
+            parts.append(f'{start}-{prev}' if start != prev else f'{start}')
+            start = prev = p
+    parts.append(f'{start}-{prev}' if start != prev else f'{start}')
+    return ','.join(parts)
+
+
+def detect_bom_pages(pdf_path):
+    """
+    Scan a PDF and return the pages most likely to contain a BOM table.
+
+    Scores each page on BOM-ish signals — header keywords (QTY, PART,
+    DESCRIPTION, ITEM, …) and the density of part-number-like tokens — then
+    keeps pages at or above half the best page's score (with a small floor).
+    Header naming varies by customer, so this is intentionally content-based.
+
+    Returns (range_string, page_list) with 1-based page numbers. Falls back to
+    ('all', [...all pages...]) if nothing scores high enough or on any error.
+    """
+    header_kws = [
+        'QTY', 'QUANTITY', 'PART', 'DESCRIPTION', 'ITEM', 'MODEL', 'MFG',
+        'MANUFACTURER', 'MPN', 'CATALOG', 'CAT NO', 'CAT.', 'UNIT', 'U/M',
+        'SUPPLIER', 'VENDOR', 'REF', 'BILL OF MATERIAL', 'PARTS LIST',
+    ]
+    try:
+        import pdfplumber
+        scores, total = {}, 0
+        with pdfplumber.open(pdf_path) as pdf:
+            total = len(pdf.pages)
+            for i, page in enumerate(pdf.pages, start=1):
+                text = (page.extract_text() or '').upper()
+                if not text.strip():
+                    continue
+                kw_hits = sum(1 for kw in header_kws if kw in text)
+                # part-number-like tokens: 4+ char alnum containing a digit
+                pn_hits = len(re.findall(r'\b(?=[A-Z0-9]*\d)[A-Z0-9]{4,}\b', text))
+                scores[i] = kw_hits + min(pn_hits, 30) * 0.3
+
+        if not scores:
+            print('[AUTO-PAGES] No text found — defaulting to all pages')
+            return 'all', list(range(1, (total or 0) + 1))
+
+        max_score = max(scores.values())
+        threshold = max(3.0, max_score * 0.5)
+        pages = sorted(p for p, s in scores.items() if s >= threshold)
+        if not pages:  # nothing cleared the bar — take the single best page
+            pages = [max(scores, key=scores.get)]
+
+        rng = _pages_to_range(pages)
+        print(f'[AUTO-PAGES] Detected BOM pages: {rng} (of {total}) | '
+              f'scores={ {p: round(s, 1) for p, s in scores.items()} }')
+        return rng, pages
+    except Exception as e:
+        print(f'[AUTO-PAGES] Detection failed ({e}) — defaulting to all pages')
+        return 'all', []
+
+
 def prepare_searchable_pdf(pdf_path):
     """Run OCR if the PDF is image-based; return (path_to_use, ocr_was_run). (LD)"""
     if detect_pdf_type(pdf_path) == 'text':

@@ -6,12 +6,14 @@ A Python-based tool for extracting, processing, and managing Bill of Materials (
 
 - **AI-Powered Extraction**: Uses a local Ollama LLM (llama3.2 or llama3.2:1b for faster CPU-only machines) with pdfplumber for semantic BoM table parsing — no Tabula or Java required
 - **Two Frontends**: A desktop GUI (ttkbootstrap/Tkinter) and a modern web app (Streamlit) — both share the same extraction pipeline
+- **Batch Processing**: Select multiple PDFs at once — each produces its own cost sheet (the web app also bundles them into a single ZIP)
+- **Auto-Detect BOM Pages**: Scans each PDF and locates the pages containing the BOM table automatically, so you don't have to enter a page range
 - **OCR Support**: Automatically preprocesses scanned/image-based PDFs via OCRmyPDF before extraction
 - **Multi-Customer Formatting**: Auto-detects and applies customer-specific column mappings and rules
 - **Interactive GUI**: ttkbootstrap-based interface with tabbed layout, settings panel, and table preview
 - **Review & Edit**: Pre-export review window for inspecting and editing extracted data before saving
 - **Live Price Lookup (toggleable)**: Searches DuckDuckGo + Grainger/McMaster for part prices, falling back to an Ollama knowledge estimate. Can be turned **off** to skip all web requests and produce blank cost columns — faster and fully offline
-- **Excel Export**: Exports processed BoM data to `.xlsx` format, including a filled OMNI cost sheet template
+- **Cost Sheet Export**: Produces a single filled OMNI cost sheet (`.xlsx`) with a user-chosen file name and destination; intermediate tables are not exported
 - **Standalone Executable**: PyInstaller-based `.exe` for sales team deployment (no Python required)
 
 ## Project Structure
@@ -110,11 +112,14 @@ streamlit run app.py --server.address 0.0.0.0 --server.port 8501
 ```
 
 In the web app:
-1. Upload a BOM PDF.
-2. Set the **page range** and **company/format** in the sidebar.
-3. Flip **Enable Live Price Lookup** on or off (off = blank prices, fully offline).
-4. Click **Run Pipeline**, then download the resulting Excel files (extracted BOM,
-   BOM with prices, and the OMNI cost sheet) from the side-by-side buttons.
+1. Upload **one or more** BOM PDFs (each produces its own cost sheet).
+2. Choose the **company/format** in the sidebar.
+3. Leave **Auto-detect BOM pages** on, or turn it off and enter a **page range**.
+4. (Single file only) Set the **cost sheet file name** under the uploader.
+5. Flip **Enable Live Price Lookup** on or off (off = blank prices, fully offline).
+6. Click **Run Pipeline**, then download the finished **OMNI cost sheet(s)** —
+   individually, or as a single **ZIP** for a batch. (The extracted/merged/priced
+   tables are intermediates and are not exported.)
 
 > **Note:** Streamlit is not bundled by PyInstaller — the web app is *served*, not
 > shipped as an `.exe`. Only the desktop GUI (Option B) is packaged into the executable.
@@ -127,9 +132,14 @@ Best for standalone use on a single machine, and the basis for the `.exe` build.
 python src/gui/BoMinationApp.py
 ```
 
-Select the PDF, page range, company, and toggle **Enable Live Price Lookup**
-(Step 4), then click **Run Automation**. Output files are written next to the
-source PDF.
+Select **one or more PDFs** (Browse supports multi-select for batch runs) and a
+company. For pages, leave **Auto-detect BOM pages** on (Step 2) or turn it off and
+enter a range. Toggle **Enable Live Price Lookup** (Step 4), then choose the **cost
+sheet file name and destination folder** (Step 5) and click **Run Automation**.
+
+Only the cost sheet is saved to your chosen folder — intermediate working files are
+cleaned up automatically. In a batch, each PDF yields `<pdf name>_cost_sheet.xlsx`;
+a summary dialog lists what was created and flags any files that failed.
 
 ### Environment Variables
 
@@ -141,6 +151,9 @@ source PDF.
 | `BOM_PAGE_RANGE` | Page range to extract (e.g. `1-3` or `all`) | `all` |
 | `BOM_COMPANY` | Customer name for specialized formatting | `generic` |
 | `BOM_OUTPUT_DIRECTORY` | Output directory for processed files | _(set via GUI)_ |
+| `BOM_COST_SHEET_DIR` | Folder to save the cost sheet into | _(source file's folder)_ |
+| `BOM_COST_SHEET_NAME` | File name for the cost sheet (`.xlsx` added if missing) | `<source>_cost_sheet.xlsx` |
+| `BOM_EXCEL_PATH` | Merged BOM file the price lookup reads | _(set by pipeline)_ |
 
 ### Table Detection Modes
 

@@ -19,8 +19,8 @@ BoMination is an internal tool that extracts Bill of Materials (BOM) tables from
 
 ## How It Works (for IT)
 
-1. User uploads a PDF through a web page and specifies a page range (and optionally a company format)
-2. The server extracts text from the PDF using **pdfplumber** (no internet required)
+1. User uploads one or more PDFs through a web page; page ranges are auto-detected (or entered manually), and a company format can optionally be selected
+2. The server extracts text from each PDF using **pdfplumber** (no internet required)
 3. The text is passed to **Ollama**, a locally-running AI model — **no data ever leaves the company network**
 4. The AI identifies and parses the BOM table
 5. **If the user enables price lookup**, part numbers are searched on DuckDuckGo to find pricing (only part numbers are sent — no document content). This is a toggle in the UI and can be left off for speed or compliance.
@@ -155,12 +155,12 @@ WantedBy=multi-user.target
 The **Streamlit web frontend is already built** — it lives at `app.py` in the repo root and is ready to deploy with `streamlit run app.py`. No further frontend development is required to launch.
 
 The web interface provides:
-- PDF file upload
-- Page range input
+- **Batch PDF upload** — process one or many PDFs in a single run (a cost sheet each, plus a combined ZIP)
+- **Auto-detect BOM pages** — finds the BOM pages automatically; manual page entry optional
 - Company/customer selector dropdown (leave blank for automatic, format-agnostic extraction)
 - **"Enable Live Price Lookup" toggle** — turn pricing on or off per run
-- Live progress indicator while processing
-- Side-by-side download buttons for the generated Excel files
+- Live progress indicator and per-file status while processing
+- Download buttons for each cost sheet (and a ZIP of the whole batch)
 
 Both frontends share the same pipeline code (`extract_main.py`, `map_cost_sheet.py`, `lookup_price.py`), which runs unchanged on the server:
 - **`app.py`** — the Streamlit web app (this deployment)

@@ -1,14 +1,15 @@
 """
 BoMination — Streamlit web frontend
 
-Upload a BOM PDF, configure extraction settings, and download up to three
-Excel outputs: the extracted BOM, the BOM with prices, and the filled OMNI
-cost sheet template.
+Upload one or more BOM PDFs, configure extraction settings, and download the
+filled OMNI cost sheet for each. Page ranges can be auto-detected per file.
 """
 
 import streamlit as st
 import sys
 import os
+import io
+import zipfile
 import tempfile
 import pandas as pd
 from pathlib import Path
@@ -33,8 +34,6 @@ if _logo.exists():
     st.logo(str(_logo), size="large")
 
 # ── Theme / CSS ────────────────────────────────────────────────────────────────
-# A restrained, corporate palette: deep slate text, a single steel-blue accent,
-# generous whitespace, and soft card borders. No decorative emojis.
 ACCENT = "#2F6FED"
 
 st.markdown(f"""
@@ -117,6 +116,8 @@ for key in ("run_results", "run_error"):
     if key not in st.session_state:
         st.session_state[key] = None
 
+MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  SIDEBAR — settings
 # ══════════════════════════════════════════════════════════════════════════════
@@ -126,17 +127,26 @@ with st.sidebar:
     company = st.selectbox(
         "Company / Format",
         options=["", "Farrell", "NEL", "Primetals", "Riley Power", "Shanklin", "901D", "Amazon"],
-        help="Selects the column mapping used for the cost sheet. Leave blank for the generic Farrell layout.",
+        help="Selects the column mapping used for the cost sheet. Leave blank for the generic, format-agnostic layout.",
+    )
+
+    auto_pages = st.toggle(
+        "Auto-detect BOM pages",
+        value=True,
+        help="Scan each PDF and find the pages that contain the BOM table automatically. "
+             "Turn off to specify pages manually.",
     )
 
     page_range = st.text_input(
         "Page range",
         placeholder="e.g.  1-3   |   5   |   2,4,6",
-        help="Which PDF pages contain the BOM table.",
+        help="Used when auto-detect is off. Applies to every file in a batch.",
+        disabled=auto_pages,
     )
 
-    with st.expander("Page range syntax"):
-        st.markdown("""
+    if not auto_pages:
+        with st.expander("Page range syntax"):
+            st.markdown("""
 | Format | Meaning |
 |--------|---------|
 | `5` | Page 5 only |
@@ -158,16 +168,10 @@ with st.sidebar:
         ),
     )
     if enable_prices:
-        st.markdown(
-            "<span class='pill pill-on'>Live lookup enabled</span>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("<span class='pill pill-on'>Live lookup enabled</span>", unsafe_allow_html=True)
         st.caption("Web search and AI estimate will run for every part.")
     else:
-        st.markdown(
-            "<span class='pill pill-off'>Offline — prices blank</span>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("<span class='pill pill-off'>Offline — prices blank</span>", unsafe_allow_html=True)
         st.caption("No web requests. Cost columns are left empty.")
 
     st.divider()
@@ -187,19 +191,47 @@ st.markdown("<div class='accent-rule'></div>", unsafe_allow_html=True)
 col_upload, col_info = st.columns([3, 2], gap="large")
 
 with col_upload:
-    st.markdown("<div class='eyebrow'>Source document</div>", unsafe_allow_html=True)
-    uploaded_file = st.file_uploader(
-        "Upload BOM PDF",
+    st.markdown("<div class='eyebrow'>Source documents</div>", unsafe_allow_html=True)
+    uploaded_files = st.file_uploader(
+        "Upload BOM PDFs",
         type="pdf",
+        accept_multiple_files=True,
         label_visibility="collapsed",
-        help="The Ollama model locates and parses the BOM table automatically.",
+        help="Upload one or many PDFs. Each produces its own cost sheet.",
     )
-    if uploaded_file:
-        st.caption(f"{uploaded_file.name} · {uploaded_file.size / 1024:.1f} KB")
+    n_files = len(uploaded_files) if uploaded_files else 0
+    if n_files == 1:
+        f = uploaded_files[0]
+        st.caption(f"{f.name} · {f.size / 1024:.1f} KB")
+    elif n_files > 1:
+        total_kb = sum(f.size for f in uploaded_files) / 1024
+        st.caption(f"{n_files} files · {total_kb:.1f} KB total — one cost sheet each")
+
+    # ── Output file name (single-file only) ────────────────────────────────────
+    cost_sheet_name = ""
+    if n_files <= 1:
+        if "cost_sheet_name" not in st.session_state:
+            st.session_state["cost_sheet_name"] = "cost_sheet"
+        if n_files == 1 and st.session_state.get("_last_pdf") != uploaded_files[0].name:
+            st.session_state["cost_sheet_name"] = f"{Path(uploaded_files[0].name).stem}_cost_sheet"
+            st.session_state["_last_pdf"] = uploaded_files[0].name
+        cost_sheet_name = st.text_input(
+            "Cost sheet file name",
+            key="cost_sheet_name",
+            help="Name for the downloaded cost sheet. The .xlsx extension is added automatically.",
+        )
+        st.caption("Only the cost sheet is produced. It downloads to your browser's default folder.")
+    else:
+        st.caption("In batch mode each cost sheet is named `<pdf name>_cost_sheet.xlsx`.")
 
 with col_info:
     st.markdown("<div class='eyebrow'>Pipeline</div>", unsafe_allow_html=True)
     with st.container(border=True):
+        step1 = (
+            "<li>Auto-detect BOM pages, then extract with Ollama</li>"
+            if auto_pages
+            else "<li>Extract BOM tables with Ollama</li>"
+        )
         step2 = (
             "<li>Look up part prices</li>"
             if enable_prices
@@ -207,106 +239,124 @@ with col_info:
         )
         st.markdown(
             "<ol class='step-list'>"
-            "<li>Extract BOM tables with Ollama</li>"
-            f"{step2}"
+            f"{step1}{step2}"
             "<li>Map to OMNI cost sheet template</li>"
             "</ol>",
             unsafe_allow_html=True,
         )
         st.divider()
-        if not page_range.strip():
-            st.caption("Enter a page range to continue.")
-        elif not uploaded_file:
-            st.caption("Upload a PDF to continue.")
+        if n_files == 0:
+            st.caption("Upload one or more PDFs to continue.")
+        elif not auto_pages and not page_range.strip():
+            st.caption("Enter a page range, or turn on auto-detect.")
         else:
-            st.caption("Ready to run.")
+            st.caption(f"Ready to run — {n_files} file{'s' if n_files != 1 else ''}.")
 
 st.write("")
 
 # ── Run ────────────────────────────────────────────────────────────────────────
-run_disabled = not uploaded_file or not page_range.strip()
+run_disabled = (n_files == 0) or (not auto_pages and not page_range.strip())
 
-if st.button(
-    "Run Pipeline",
-    type="primary",
-    use_container_width=True,
-    disabled=run_disabled,
-):
+if st.button("Run Pipeline", type="primary", use_container_width=True, disabled=run_disabled):
     st.session_state.run_results = None
     st.session_state.run_error   = None
 
-    with st.status("Running BoMination pipeline…", expanded=True) as pipeline_status:
+    with st.status(f"Processing {n_files} file{'s' if n_files != 1 else ''}…", expanded=True) as pipeline_status:
         try:
             from pipeline.main_pipeline import run_extract_bom_with_llm
-            from pipeline.lookup_price  import lookup_prices_for_bom, _build_empty_output
+            from pipeline.lookup_price   import lookup_prices_for_bom, _build_empty_output
             from pipeline.map_cost_sheet import map_and_insert_data
+            from pipeline.extract_main   import detect_bom_pages
+
+            results, errors = {}, []
+            progress = st.progress(0.0)
 
             with tempfile.TemporaryDirectory() as _tmpdir:
                 tmpdir = Path(_tmpdir)
 
-                # Save uploaded PDF to a working directory
-                pdf_path = tmpdir / uploaded_file.name
-                pdf_path.write_bytes(uploaded_file.getvalue())
-                pdf_stem = pdf_path.stem
+                for idx, up in enumerate(uploaded_files, start=1):
+                    st.markdown(f"**[{idx}/{n_files}] {up.name}**")
+                    try:
+                        pdf_path = tmpdir / up.name
+                        pdf_path.write_bytes(up.getvalue())
+                        pdf_stem = pdf_path.stem
 
-                # ── Step 1: Extract ────────────────────────────────────────
-                st.write("Step 1 of 3 — Extracting BOM tables with Ollama…")
-                merged_path = run_extract_bom_with_llm(
-                    str(pdf_path), page_range.strip(), company
-                )
-                st.write("Extraction complete.")
+                        # ── Resolve page range (auto or manual) ────────────
+                        if auto_pages:
+                            rng, _pages = detect_bom_pages(str(pdf_path))
+                            rng = rng or "all"
+                            st.write(f"Auto-detected pages: {rng}")
+                        else:
+                            rng = page_range.strip()
 
-                # ── Step 2: Price lookup (gated by the toggle) ─────────────
-                df_merged = pd.read_excel(
-                    str(merged_path), keep_default_na=False, na_values=[""]
-                )
+                        # ── Step 1: Extract ────────────────────────────────
+                        st.write("Extracting BOM tables with Ollama…")
+                        merged_path = run_extract_bom_with_llm(str(pdf_path), rng, company)
 
-                if enable_prices:
-                    st.write("Step 2 of 3 — Looking up part prices…")
-                    df_priced = lookup_prices_for_bom(df_merged)
-                    priced_count = (df_priced["Unit Price in USD"] != "").sum()
-                    st.write(f"Prices retrieved — {priced_count} of {len(df_priced)} parts priced.")
-                else:
-                    st.write("Step 2 of 3 — Price lookup skipped (toggle off).")
-                    df_priced = _build_empty_output(df_merged)
-                    st.write("Cost columns left blank.")
+                        df_merged = pd.read_excel(str(merged_path), keep_default_na=False, na_values=[""])
 
-                # Persist the OEMSecrets-schema frame for the mapper
-                prices_path = tmpdir / f"{pdf_stem}_merged_with_prices.xlsx"
-                df_priced.to_excel(str(prices_path), index=False)
+                        # ── Step 2: Pricing ────────────────────────────────
+                        if enable_prices:
+                            st.write("Looking up part prices…")
+                            df_priced = lookup_prices_for_bom(df_merged)
+                            priced = (df_priced["Unit Price in USD"] != "").sum()
+                            st.write(f"Priced {priced} of {len(df_priced)} parts.")
+                        else:
+                            df_priced = _build_empty_output(df_merged)
+                            st.write("Price lookup skipped — cost columns blank.")
 
-                # ── Step 3: Cost sheet ─────────────────────────────────────
-                st.write("Step 3 of 3 — Generating OMNI cost sheet…")
-                os.environ["BOM_COMPANY"] = company
-                map_and_insert_data(str(prices_path), str(merged_path))
-                st.write("Cost sheet generated.")
+                        prices_path = tmpdir / f"{pdf_stem}_merged_with_prices.xlsx"
+                        df_priced.to_excel(str(prices_path), index=False)
 
-                # ── Collect output bytes before the tmpdir is removed ──────
-                cost_sheet_path = tmpdir / f"{pdf_stem}_cost_sheet.xlsx"
-                output_files = {
-                    "extracted":     {"label": "Extracted BOM",   "path": merged_path},
-                    "merged_prices": {"label": "BOM with Prices",  "path": prices_path},
-                    "cost_sheet":    {"label": "OMNI Cost Sheet",  "path": cost_sheet_path},
-                }
+                        # ── Step 3: Cost sheet ─────────────────────────────
+                        if n_files == 1 and cost_sheet_name.strip():
+                            fname = cost_sheet_name.strip()
+                        else:
+                            fname = f"{pdf_stem}_cost_sheet"
+                        if not fname.lower().endswith(".xlsx"):
+                            fname += ".xlsx"
 
-                results = {}
-                for key, meta in output_files.items():
-                    p = Path(meta["path"])
-                    if p.exists():
-                        results[key] = {
-                            "label": meta["label"],
-                            "name":  p.name,
-                            "bytes": p.read_bytes(),
-                        }
+                        os.environ["BOM_COMPANY"] = company
+                        saved = map_and_insert_data(
+                            str(prices_path), str(merged_path),
+                            output_path=str(tmpdir / fname),
+                        )
+                        saved_path = Path(saved)
+                        if saved_path.exists():
+                            # de-dupe download keys if two PDFs share a stem
+                            key = saved_path.name
+                            if key in results:
+                                key = f"{idx}_{key}"
+                            results[key] = {
+                                "name":  saved_path.name,
+                                "bytes": saved_path.read_bytes(),
+                                "source": up.name,
+                            }
+                            st.write(f"✓ Cost sheet ready: {saved_path.name}")
+                        else:
+                            errors.append(f"{up.name}: cost sheet not produced")
+                            st.write("✗ Cost sheet was not produced.")
+
+                    except Exception as file_exc:
+                        errors.append(f"{up.name}: {file_exc}")
+                        st.write(f"✗ Failed: {file_exc}")
+
+                    progress.progress(idx / n_files)
 
                 st.session_state.run_results = results
-                st.session_state.run_error   = None
 
-            pipeline_status.update(
-                label="Pipeline complete — files ready to download.",
-                state="complete",
-                expanded=False,
-            )
+            n_ok = len(results)
+            if n_ok == n_files:
+                pipeline_status.update(label=f"Done — {n_ok} cost sheet{'s' if n_ok != 1 else ''} ready.",
+                                       state="complete", expanded=False)
+            elif n_ok > 0:
+                pipeline_status.update(label=f"Finished with issues — {n_ok}/{n_files} succeeded.",
+                                       state="complete", expanded=True)
+            else:
+                pipeline_status.update(label="All files failed.", state="error", expanded=True)
+
+            if errors:
+                st.session_state.run_error = "\n".join(errors)
 
         except Exception as exc:
             import traceback as _tb
@@ -316,30 +366,42 @@ if st.button(
 
 # ── Error detail ────────────────────────────────────────────────────────────────
 if st.session_state.run_error:
-    with st.expander("Error details", expanded=True):
+    with st.expander("Issues / error details", expanded=True):
         st.code(st.session_state.run_error, language="text")
 
 # ── Results ─────────────────────────────────────────────────────────────────────
 if st.session_state.run_results:
+    results = st.session_state.run_results
     st.divider()
     st.markdown("<div class='eyebrow'>Downloads</div>", unsafe_allow_html=True)
 
-    results = st.session_state.run_results
-    dl_cols = st.columns(len(results), gap="medium")
+    # Batch: offer a single ZIP of all cost sheets
+    if len(results) > 1:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for info in results.values():
+                z.writestr(info["name"], info["bytes"])
+        st.download_button(
+            f"⬇ Download all {len(results)} cost sheets (ZIP)",
+            data=buf.getvalue(),
+            file_name="cost_sheets.zip",
+            mime="application/zip",
+            use_container_width=True,
+            type="primary",
+            key="dl_zip",
+        )
+        st.write("")
 
-    for col, (key, info) in zip(dl_cols, results.items()):
-        with col:
-            with st.container(border=True):
-                st.markdown(f"**{info['label']}**")
-                st.caption(info["name"])
-                st.download_button(
-                    label="Download",
-                    data=info["bytes"],
-                    file_name=info["name"],
-                    mime=(
-                        "application/vnd.openxmlformats-officedocument"
-                        ".spreadsheetml.sheet"
-                    ),
-                    use_container_width=True,
-                    key=f"dl_{key}",
-                )
+    # Individual download cards
+    for key, info in results.items():
+        with st.container(border=True):
+            st.markdown(f"**{info['name']}**")
+            st.caption(f"from {info['source']}")
+            st.download_button(
+                label="Download",
+                data=info["bytes"],
+                file_name=info["name"],
+                mime=MIME_XLSX,
+                use_container_width=True,
+                key=f"dl_{key}",
+            )

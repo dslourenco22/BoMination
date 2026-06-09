@@ -43,7 +43,16 @@ def get_merged_file():
             return path
         print("Invalid merged file path.")
 
-def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH):
+def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH, output_path=None):
+    """Fill the cost sheet template and save it.
+
+    Output location is resolved in this priority order:
+      1. `output_path` argument (explicit full path), if given
+      2. BOM_COST_SHEET_DIR / BOM_COST_SHEET_NAME environment variables
+      3. Default: alongside the source file as "<base>_cost_sheet.xlsx"
+
+    Returns the path the cost sheet was saved to.
+    """
     df_oem = pd.read_excel(oem_path, keep_default_na=False, na_values=[''])
     df_merged = pd.read_excel(merged_path, keep_default_na=False, na_values=[''])
 
@@ -584,16 +593,28 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
         missing = [k for k in _needed if k not in excel_headers]
         print(f"[FORMULA] Skipping EXT COST — columns not found in template: {missing}")
 
-    # Save to PDF directory instead of using output_directory parameter
-    # Get the original PDF path from the oem_path (which is based on the merged file)
+    # ── Resolve where to save the cost sheet ────────────────────────────────────
     oem_path_obj = Path(oem_path)
-    # Extract the base name without the suffixes to get back to the original PDF name
     base_name = oem_path_obj.stem.replace("_merged_with_prices", "").replace("_merged", "")
-    cost_sheet_path = oem_path_obj.parent / f"{base_name}_cost_sheet.xlsx"
-    
+
+    if output_path:
+        cost_sheet_path = Path(output_path)
+    else:
+        out_dir  = os.environ.get("BOM_COST_SHEET_DIR", "").strip()
+        out_name = os.environ.get("BOM_COST_SHEET_NAME", "").strip()
+        directory = Path(out_dir) if out_dir else oem_path_obj.parent
+        filename  = out_name if out_name else f"{base_name}_cost_sheet.xlsx"
+        cost_sheet_path = directory / filename
+
+    # Always ensure a .xlsx extension and that the target directory exists
+    if cost_sheet_path.suffix.lower() != ".xlsx":
+        cost_sheet_path = cost_sheet_path.with_suffix(".xlsx")
+    cost_sheet_path.parent.mkdir(parents=True, exist_ok=True)
+
     print(f"📁 Saving cost sheet to: {cost_sheet_path}")
-    wb.save(cost_sheet_path)
+    wb.save(str(cost_sheet_path))
     print(f"Final cost sheet saved to: {cost_sheet_path}")
+    return str(cost_sheet_path)
 
 def main():
     """Main function to be called by the pipeline."""
@@ -616,7 +637,9 @@ def main():
         except Exception as e:
             print(f"🐛 DEBUG: Error reading OEM file: {e}")
     
-    map_and_insert_data(oem_path, merged_path)
+    saved = map_and_insert_data(oem_path, merged_path)
+    print(f"✅ Cost sheet written to: {saved}")
+    return saved
 
 if __name__ == "__main__":
     main()
