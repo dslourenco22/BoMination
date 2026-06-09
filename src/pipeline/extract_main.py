@@ -583,14 +583,19 @@ def process_and_format_tables(tables, customer_name=''):
                 continue
             table = cleaned[0]
 
-            if customer_name:
-                try:
-                    from omni_cust.customer_formatters import apply_customer_formatter
-                    formatted = apply_customer_formatter(table, customer_name)
-                    if formatted is not None:
-                        table = formatted
-                except Exception as fmt_err:
-                    print(f'  [WARN] Customer formatter failed: {fmt_err}')
+            # Always run a formatter. apply_customer_formatter() routes a blank /
+            # unknown company to the generic content-aware formatter, which is what
+            # standardizes column names (Part Number / Quantity / Description / …)
+            # so the cost sheet can be populated. Previously this was gated on
+            # `if customer_name:`, so the no-company path skipped formatting entirely
+            # and the cost sheet came out empty.
+            try:
+                from omni_cust.customer_formatters import apply_customer_formatter
+                formatted = apply_customer_formatter(table, customer_name)
+                if formatted is not None:
+                    table = formatted
+            except Exception as fmt_err:
+                print(f'  [WARN] Customer formatter failed: {fmt_err}')
 
             processed.append(table)
             print(f'  [OK] Table {i + 1} ready ({table.shape[0]}x{table.shape[1]})')
