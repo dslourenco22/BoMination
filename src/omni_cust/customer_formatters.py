@@ -389,6 +389,170 @@ def clean_nel_columns(df):
     return df
 
 
+# ── Generic, content-aware column-role inference ──────────────────────────────
+# The generic formatter must work for ANY customer regardless of header naming.
+# Header names vary endlessly ("Item Number", "MFG P/N", "Cat. No.", "Part#"...),
+# but the *content* of a column is consistent: a quantity column holds small
+# integers, a part-number column holds unique alphanumeric tokens with digits,
+# a description column holds prose. We classify on header hints AND content, and
+# let content settle ambiguous cases. Output names match what map_cost_sheet.py
+# and lookup_price.py already look for: Part Number / Quantity / Description /
+# Manufacturer / Item / Notes / Unit.
+
+_UNIT_TOKENS = {
+    'EA', 'EACH', 'PC', 'PCS', 'PCE', 'FT', 'FEET', 'IN', 'INCH', 'M', 'MM', 'CM',
+    'KG', 'LB', 'LBS', 'G', 'SET', 'SETS', 'ROLL', 'BOX', 'PK', 'PKG', 'PAIR',
+    'PR', 'L', 'GAL', 'SHT', 'SHEET', 'ASSY', 'LOT', 'UNIT', 'UN', 'NO',
+}
+
+_MFR_HINTS = {
+    'SIEMENS', 'ALLEN', 'BRADLEY', 'ROCKWELL', 'PHOENIX', 'RITTAL', 'ABB',
+    'SCHNEIDER', 'EATON', 'OMRON', 'PANASONIC', 'HUBBELL', 'PANDUIT', 'ICOTEK',
+    'WEIDMULLER', 'WAGO', 'MOLEX', 'BELDEN', 'LAPP', 'TURCK', 'BANNER',
+    'PEPPERL', 'FUCHS', 'SICK', 'BALLUFF', 'FESTO', 'PARKER', 'BUSSMANN',
+    'MERSEN', 'LITTELFUSE', 'SQUARE D', 'HONEYWELL', 'THOMAS AND BETTS', 'CLARION',
+}
+
+
+def _generic_col_features(series):
+    """Compute content fingerprint for one column. Returns None if all-empty."""
+    vals = series.dropna().astype(str).str.strip()
+    vals = vals[(vals != '') & (~vals.str.lower().isin(['nan', 'n/a', 'none', '-']))]
+    n = len(vals)
+    if n == 0:
+        return None
+
+    def _frac(pred):
+        return sum(pred(v) for v in vals) / n
+
+    def _is_smallint(v):
+        v2 = v.replace(',', '')
+        return v2.isdigit() and 1 <= len(v2) <= 4          # 1..9999 → qty / line no.
+
+    def _is_partnum(v):
+        # A part number is a single token (no spaces), 4–30 chars, with a digit.
+        if ' ' in v or not (4 <= len(v) <= 30):
+            return False
+        if not re.search(r'\d', v):
+            return False
+        return bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9\-\./#]+', v))
+
+    def _is_unit(v):
+        return v.upper().replace('.', '') in _UNIT_TOKENS
+
+    def _has_mfr(v):
+        u = v.upper()
+        return any(m in u for m in _MFR_HINTS)
+
+    # sequential 1,2,3… → a line/item number, NOT a quantity
+    seq = False
+    nums = [int(v.replace(',', '')) for v in vals if v.replace(',', '').isdigit()]
+    if len(nums) >= 3 and len(nums) >= 0.6 * n:
+        seq = nums[0] <= 5 and all(0 < (b - a) <= 3 for a, b in zip(nums, nums[1:]))
+
+    return {
+        'frac_smallint': _frac(_is_smallint),
+        'frac_partnum':  _frac(_is_partnum),
+        'frac_unit':     _frac(_is_unit),
+        'frac_mfr':      _frac(_has_mfr),
+        'avg_words':     vals.str.split().apply(len).mean(),
+        'avg_len':       vals.str.len().mean(),
+        'uniq':          vals.nunique() / n,
+        'sequential':    seq,
+    }
+
+
+def _generic_header_role(col):
+    """Best-guess role from the header name alone, or None. Specific → generic."""
+    c = re.sub(r'\s+', ' ', str(col).upper().strip())
+    rules = [
+        ('Unit',         [r'\bU/?M\b', r'\bUOM\b', 'UNIT OF MEAS']),
+        ('Quantity',     [r'\bQTY\b', 'QUANT', r"\bQ'?TY\b", r'\bQNTY\b']),
+        ('Part Number',  ['PART NUMBER', 'PART NO', 'PART#', 'PART #', r'\bMPN\b',
+                          'MFG PART', 'MFR PART', 'MANUFACTURER PART', 'CATALOG',
+                          r'\bCAT\.? ?NO', r'\bMODEL\b', 'ORDER CODE', 'ORDER NO',
+                          'ARTICLE', 'ITEM NUMBER', r'\bP/N\b', 'STOCK NO', r'\bSKU\b']),
+        ('Description',  ['DESCRIPTION', r'\bDESC\b', 'ITEM NAME', 'NOMENCLATURE',
+                          'PART NAME', 'ITEM DESC']),
+        ('Manufacturer', ['MANUFACTURER', r'\bMFR\b', r'\bMFG\b', r'\bMAKE\b',
+                          'BRAND', 'VENDOR', 'SUPPLIER']),
+        ('Notes',        ['NOTES', r'\bNOTE\b', 'REMARK', 'COMMENT']),
+        ('Reference',    ['REFERENCE', 'REF DES', r'\bREF\b', 'DESIGNAT', r'\bTAG\b',
+                          'LOCATION', r'\bLOC\b']),
+        ('Item',         [r'\bITEM\b', r'\bLINE\b', r'\bFIND\b', r'\bPOS\b',
+                          r'\bSEQ\b', r'\bBALLOON\b']),
+    ]
+    for role, pats in rules:
+        if any(re.search(p, c) for p in pats):
+            return role
+    return None
+
+
+def _infer_generic_roles(df):
+    """
+    Map original column names → standardized roles using header + content signals.
+    Each role is awarded to at most one column (the strongest candidate).
+    Returns {original_name: standard_name}.
+    """
+    feats, headers = {}, {}
+    for col in df.columns:
+        f = _generic_col_features(df[col])
+        if f is not None:
+            feats[col] = f
+            headers[col] = _generic_header_role(col)
+
+    if not feats:
+        return {}
+
+    def score(col, role):
+        f = feats[col]
+        s = 2.0 if headers[col] == role else 0.0          # header agreement bonus
+        if role == 'Unit':
+            s += 4.0 * f['frac_unit']
+        elif role == 'Quantity':
+            if not f['sequential']:
+                s += 3.0 * f['frac_smallint']
+        elif role == 'Item':
+            if f['sequential']:
+                s += 3.0
+        elif role == 'Part Number':
+            s += 3.0 * f['frac_partnum'] + f['uniq']
+            if f['avg_words'] > 3:                          # prose ≠ part number
+                s -= 2.0
+        elif role == 'Description':
+            s += min(f['avg_words'], 8) * 0.5
+            if f['avg_len'] > 25:
+                s += 1.0
+        elif role == 'Manufacturer':
+            s += 3.0 * f['frac_mfr']
+        elif role in ('Notes', 'Reference'):
+            pass                                           # header-driven only
+        return s
+
+    # Minimum score required to claim each role (avoids spurious mappings).
+    thresholds = {
+        'Unit': 2.0, 'Quantity': 1.5, 'Item': 2.0, 'Part Number': 1.2,
+        'Description': 1.5, 'Manufacturer': 1.5, 'Notes': 2.0, 'Reference': 2.0,
+    }
+    # Assign the most specific/critical roles first.
+    order = ['Unit', 'Quantity', 'Item', 'Part Number', 'Description',
+             'Manufacturer', 'Notes', 'Reference']
+
+    rename, taken = {}, set()
+    for role in order:
+        best, best_s = None, thresholds[role]
+        for col in feats:
+            if col in taken:
+                continue
+            s = score(col, role)
+            if s >= best_s:
+                best, best_s = col, s
+        if best is not None:
+            rename[best] = role
+            taken.add(best)
+    return rename
+
+
 def clean_generic_columns(df):
     """
     Generic table formatting that can be applied to any customer's BOM tables.
@@ -434,34 +598,17 @@ def clean_generic_columns(df):
     df = df[~df.apply(lambda row: row.astype(str).str.strip().tolist() == df.columns.astype(str).tolist(), axis=1)]
     df = df.reset_index(drop=True)
 
-    # Basic column standardization
-    column_mapping = {
-        'ITEM': 'Item',
-        'ITEM NO': 'Item',
-        'QTY': 'Quantity',
-        'QUANTITY': 'Quantity',
-        'PART NUMBER': 'Part Number',
-        'PART': 'Part Number',
-        'DESCRIPTION': 'Description',
-        'DESC': 'Description',
-        'REFERENCE': 'Reference',
-        'REF': 'Reference',
-        'MANUFACTURER': 'Manufacturer',
-        'MFG': 'Manufacturer',
-        'MPN': 'MPN',
-        'MFG P/N': 'MPN',
-        'VENDOR': 'Vendor',
-        'SUPPLIER': 'Supplier',
-        'NOTES': 'Notes'
-    }
-    
-    # Apply column mapping
-    for old_col, new_col in column_mapping.items():
-        for col in df.columns:
-            if old_col in str(col).upper():
-                df.rename(columns={col: new_col}, inplace=True)
-                print(f"🔧 GENERIC DEBUG: Renamed '{col}' to '{new_col}'")
-                break
+    # Standardize columns by INFERRING each column's role from its header *and*
+    # its actual content. Content-based inference is what makes this truly generic:
+    # it works no matter how a customer names their columns. Output names match
+    # what map_cost_sheet.py / lookup_price.py already look for.
+    rename_map = _infer_generic_roles(df)
+    if rename_map:
+        df.rename(columns=rename_map, inplace=True)
+        for old, new in rename_map.items():
+            print(f"🔧 GENERIC DEBUG: Mapped '{old}' -> '{new}' (role inference)")
+    else:
+        print("🔧 GENERIC DEBUG: No columns confidently classified by role inference")
 
     print(f"🔧 GENERIC DEBUG: Final table shape: {df.shape}")
     print(f"🔧 GENERIC DEBUG: Final columns: {df.columns.tolist()}")

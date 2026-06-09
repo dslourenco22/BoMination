@@ -486,15 +486,26 @@ def clean_and_filter_tables(tables, method_name):
                 'ALL RIGHTS RESERVED',
                 'DO NOT REPRODUCE',
                 'WITHOUT WRITTEN PERMISSION',
+                'WRITTEN PERMISSION OF',
                 'PROPRIETARY AND CONFIDENTIAL',
+                'PROPRIETARY INFORMATION',
+                'CONFIDENTIAL PROPERTY',
+                'SUBJECT TO RECALL',
                 'INFORMATION CONTAINED HEREIN IS THE PROPERTY',
                 'APPROVED BY', 'CHECKED BY', 'DRAWN BY',
             ]
             def _is_junk_row(row):
                 combined = ' '.join(str(v) for v in row).upper()
-                # Part numbers are alphanumeric+hyphen/slash tokens of 4+ chars,
-                # OR standalone uppercase tokens of 5+ chars (e.g. T153930).
-                has_pn = bool(re.search(r'[A-Z0-9]{3,}[-/][A-Z0-9]|[A-Z0-9]{5,}', combined))
+                # A real part number ALWAYS contains a digit (e.g. 6ES7155-6AU00,
+                # 5SJ4111-8HG41, 1034250). Match either a hyphen/slash-joined
+                # alphanumeric token, or any 3+ char token that contains a digit.
+                # Plain English words (GILLETTE, COMPANY, PERMISSION) have no digit
+                # and must NOT be mistaken for part numbers — that is what let the
+                # proprietary/legal notice survive previously.
+                has_pn = bool(re.search(
+                    r'[A-Z0-9]{2,}[-/][A-Z0-9]'          # hyphen/slash part numbers
+                    r'|\b(?=[A-Z0-9]*\d)[A-Z0-9]{3,}\b', # 3+ char token with a digit
+                    combined))
                 if len(combined) > 100 and not has_pn:
                     return True
                 return any(phrase in combined for phrase in junk_phrases)
