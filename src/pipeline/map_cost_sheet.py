@@ -469,10 +469,11 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
     # Handle missing values carefully - preserve numeric columns
     for col in df_out.columns:
         if col == "COST EACH":
-            # For cost column, preserve numeric values but replace true NaN with 0
+            # Convert to numeric; leave NaN as NaN so blank prices write as
+            # empty cells rather than 0 (direct injection below may fill them).
             print(f"💰 Processing COST EACH column...")
             print(f"💰 COST EACH sample values: {df_out[col].head().tolist()}")
-            df_out[col] = pd.to_numeric(df_out[col], errors='coerce').fillna(0)
+            df_out[col] = pd.to_numeric(df_out[col], errors='coerce')
             print(f"💰 COST EACH after processing: {df_out[col].tolist()}")
         else:
             # For other columns, replace NaN with "N/A"
@@ -491,12 +492,13 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH)
         non_zero = (raw_prices > 0).sum()
         print(f"💰 Direct price injection: {non_zero}/{len(raw_prices)} non-zero prices")
         if "COST EACH" not in df_out.columns:
-            df_out["COST EACH"] = raw_prices.fillna(0).values
+            # NaN stays NaN → blank cell, not 0
+            df_out["COST EACH"] = raw_prices.values
         else:
-            # Overwrite whatever mapping produced — real prices win
-            df_out["COST EACH"] = raw_prices.fillna(df_out["COST EACH"]).values
+            # Real prices override mapped values; NaN stays NaN → blank cell
+            df_out["COST EACH"] = raw_prices.where(raw_prices.notna(), df_out["COST EACH"]).values
     else:
-        print("⚠️ Unit Price in USD not found in price file — COST EACH will be 0")
+        print("⚠️ Unit Price in USD not found in price file — COST EACH will be blank")
 
     # Add ITEM numbers (sequential numbering)
     if "ITEM" not in df_out.columns:

@@ -824,7 +824,12 @@ Invalid formats:
                 self.start_progress("Running price lookup...")
                 self.add_log_message("Step 2: Looking up supplier prices...", "step")
                 log_to_file("Starting price lookup...")
-                
+
+                # Compute the path that lookup_price.py will write to
+                _mp   = Path(str(merged_path))
+                _base = _mp.stem.replace('_merged', '')
+                prices_path = _mp.parent / f'{_base}_merged_with_prices.xlsx'
+
                 try:
                     from pipeline.lookup_price import main as lookup_main
                     os.environ["BOM_EXCEL_PATH"] = str(merged_path)
@@ -834,15 +839,19 @@ Invalid formats:
                 except Exception as lookup_error:
                     log_to_file(f"Price lookup failed: {lookup_error}")
                     self.add_log_message(f"Price lookup failed (continuing anyway): {lookup_error}", "warning")
-                
+
+                # Fall back to merged file if price lookup did not produce output
+                if not prices_path.exists():
+                    prices_path = _mp
+
                 # Step 3: Cost sheet mapping (LD)
                 self.start_progress("Mapping to cost sheet template...")
                 self.add_log_message("Step 3: Mapping to OMNI cost sheet template...", "step")
                 log_to_file("Starting cost sheet mapping...")
-                
+
                 try:
                     from pipeline.map_cost_sheet import main as map_main
-                    os.environ["OEM_INPUT_PATH"] = str(merged_path)
+                    os.environ["OEM_INPUT_PATH"] = str(prices_path)   # priced file, not merged
                     os.environ["MERGED_BOM_PATH"] = str(merged_path)
                     os.environ["BOM_COMPANY"] = str(company)
                     map_main()
