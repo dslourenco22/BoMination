@@ -374,6 +374,9 @@ class BoMApp:
         # Add ROI selection variable
         self.use_roi = tk.BooleanVar(value=False)  # Default to automatic mode
 
+        # Live price lookup toggle (ON = web search + AI estimate; OFF = blank prices)
+        self.enable_prices = tk.BooleanVar(value=True)
+
         # Progress components
         self.progress_var = tk.StringVar(value="Ready to process your BoM files")
         self.progress_bar = None
@@ -492,12 +495,36 @@ class BoMApp:
         
         # Info label for company
         company_info_label = ttk.Label(
-            company_frame, 
-            text="Select if your PDF requires company-specific formatting", 
+            company_frame,
+            text="Select if your PDF requires company-specific formatting",
             font=("Segoe UI", 9),
             bootstyle="secondary"
         )
         company_info_label.pack(anchor=W, pady=(5, 0))
+
+        # Step 4: Price lookup toggle
+        price_frame = ttk.LabelFrame(main_container_padded, text="Step 4: Pricing", padding=15)
+        price_frame.pack(fill=X, pady=(0, 15))
+
+        price_toggle = ttk.Checkbutton(
+            price_frame,
+            text="Enable Live Price Lookup",
+            variable=self.enable_prices,
+            bootstyle="success-round-toggle",
+            command=self.on_price_toggle
+        )
+        price_toggle.pack(anchor=W, pady=5)
+
+        self.price_info_label = ttk.Label(
+            price_frame,
+            text="ON: searches the web and estimates prices.  OFF: skips all web "
+                 "requests and leaves cost columns blank (faster, fully offline).",
+            font=("Segoe UI", 9),
+            bootstyle="secondary",
+            wraplength=560,
+            justify="left"
+        )
+        self.price_info_label.pack(anchor=W, pady=(5, 0))
 
         # Action buttons frame
         button_frame = ttk.Frame(main_container_padded)
@@ -669,6 +696,21 @@ Invalid formats:
             self.pdf_path.set(file_path)
             self.add_log_message(f"Selected PDF: {Path(file_path).name}", "info")
 
+    def on_price_toggle(self):
+        """Update the helper text and log when the price lookup toggle changes."""
+        if self.enable_prices.get():
+            self.add_log_message("Live price lookup enabled", "info")
+            self.price_info_label.configure(
+                text="ON: searches the web and estimates prices.  OFF: skips all web "
+                     "requests and leaves cost columns blank (faster, fully offline)."
+            )
+        else:
+            self.add_log_message("Live price lookup disabled - cost columns will be blank", "info")
+            self.price_info_label.configure(
+                text="OFF: web requests skipped. Cost columns will be left blank in the "
+                     "merged file and cost sheet."
+            )
+
     def run_pipeline(self):
         """Run the pipeline with comprehensive input validation."""
         pdf = self.pdf_path.get()
@@ -820,29 +862,51 @@ Invalid formats:
                 log_to_file(f"LLM extraction completed: {merged_path}")
                 self.add_log_message("LLM extraction completed successfully!", "success")
                 
-                # Step 2: Price lookup (LD)
-                self.start_progress("Running price lookup...")
-                self.add_log_message("Step 2: Looking up supplier prices...", "step")
-                log_to_file("Starting price lookup...")
-
+                # Step 2: Price lookup (LD) — gated by the "Enable Live Price Lookup" toggle
                 # Compute the path that lookup_price.py will write to
                 _mp   = Path(str(merged_path))
                 _base = _mp.stem.replace('_merged', '')
                 prices_path = _mp.parent / f'{_base}_merged_with_prices.xlsx'
 
-                try:
-                    from pipeline.lookup_price import main as lookup_main
-                    os.environ["BOM_EXCEL_PATH"] = str(merged_path)
-                    lookup_main()
-                    log_to_file("Price lookup completed")
-                    self.add_log_message("Price lookup completed", "success")
-                except Exception as lookup_error:
-                    log_to_file(f"Price lookup failed: {lookup_error}")
-                    self.add_log_message(f"Price lookup failed (continuing anyway): {lookup_error}", "warning")
+                if self.enable_prices.get():
+                    self.start_progress("Running price lookup...")
+                    self.add_log_message("Step 2: Looking up supplier prices...", "step")
+                    log_to_file("Starting price lookup...")
 
-                # Fall back to merged file if price lookup did not produce output
-                if not prices_path.exists():
-                    prices_path = _mp
+                    try:
+                        from pipeline.lookup_price import main as lookup_main
+                        os.environ["BOM_EXCEL_PATH"] = str(merged_path)
+                        lookup_main()
+                        log_to_file("Price lookup completed")
+                        self.add_log_message("Price lookup completed", "success")
+                    except Exception as lookup_error:
+                        log_to_file(f"Price lookup failed: {lookup_error}")
+                        self.add_log_message(f"Price lookup failed (continuing anyway): {lookup_error}", "warning")
+
+                    # Fall back to merged file if price lookup did not produce output
+                    if not prices_path.exists():
+                        prices_path = _mp
+                else:
+                    # Toggle OFF: skip all web requests, write a blank-price file
+                    # in the OEMSecrets schema so the cost sheet mapper still runs.
+                    self.start_progress("Skipping price lookup (disabled)...")
+                    self.add_log_message("Step 2: Price lookup disabled - generating blank prices", "step")
+                    log_to_file("Price lookup skipped (toggle off)")
+
+                    try:
+                        import pandas as pd
+                        from pipeline.lookup_price import _build_empty_output
+                        df_merged = pd.read_excel(str(merged_path), keep_default_na=False, na_values=[''])
+                        df_blank = _build_empty_output(df_merged)
+                        df_blank.to_excel(str(prices_path), index=False)
+                        log_to_file(f"Blank-price file written: {prices_path}")
+                        self.add_log_message("Blank price file generated", "success")
+                    except Exception as blank_error:
+                        log_to_file(f"Blank-price generation failed: {blank_error}")
+                        self.add_log_message(f"Blank-price generation failed: {blank_error}", "warning")
+                        # Fall back to merged file so mapping can still proceed
+                        if not prices_path.exists():
+                            prices_path = _mp
 
                 # Step 3: Cost sheet mapping (LD)
                 self.start_progress("Mapping to cost sheet template...")

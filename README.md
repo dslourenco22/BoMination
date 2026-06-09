@@ -5,18 +5,20 @@ A Python-based tool for extracting, processing, and managing Bill of Materials (
 ## Features
 
 - **AI-Powered Extraction**: Uses a local Ollama LLM (llama3.2 or llama3.2:1b for faster CPU-only machines) with pdfplumber for semantic BoM table parsing — no Tabula or Java required
+- **Two Frontends**: A desktop GUI (ttkbootstrap/Tkinter) and a modern web app (Streamlit) — both share the same extraction pipeline
 - **OCR Support**: Automatically preprocesses scanned/image-based PDFs via OCRmyPDF before extraction
 - **Multi-Customer Formatting**: Auto-detects and applies customer-specific column mappings and rules
 - **Interactive GUI**: ttkbootstrap-based interface with tabbed layout, settings panel, and table preview
 - **Review & Edit**: Pre-export review window for inspecting and editing extracted data before saving
-- **Price Lookup**: Automated price matching against cost sheets (Excel)
-- **Excel Export**: Exports processed BoM data to `.xlsx` format
+- **Live Price Lookup (toggleable)**: Searches DuckDuckGo + Grainger/McMaster for part prices, falling back to an Ollama knowledge estimate. Can be turned **off** to skip all web requests and produce blank cost columns — faster and fully offline
+- **Excel Export**: Exports processed BoM data to `.xlsx` format, including a filled OMNI cost sheet template
 - **Standalone Executable**: PyInstaller-based `.exe` for sales team deployment (no Python required)
 
 ## Project Structure
 
 ```
 BoMination/
+├── app.py                          # Streamlit web app (web frontend)
 ├── src/
 │   ├── gui/
 │   │   ├── BoMinationApp.py       # Main application entry point & GUI
@@ -55,7 +57,7 @@ The application auto-detects the customer from document content and applies spec
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.9+ (3.12 recommended; required by the Streamlit web app)
 - [Ollama](https://ollama.com/) running locally with `llama3.2` (recommended) or `llama3.2:1b` (faster on CPU-only machines) pulled
 - Tesseract OCR (required by OCRmyPDF for scanned/image-based PDFs)
 
@@ -88,11 +90,46 @@ The application auto-detects the customer from document content and applies spec
 
 ## Usage
 
-### Running the Application
+BoMination ships with **two interchangeable frontends** that drive the same
+extraction pipeline. Pick whichever fits your deployment:
+
+### Option A — Web App (Streamlit)
+
+Best for server-hosted, browser-based access (see `SERVER_DEPLOYMENT.md`). No
+local install for end users — they just open a URL.
+
+```bash
+streamlit run app.py
+```
+
+Then open the URL Streamlit prints (default http://localhost:8501). To expose it
+on the network for the team:
+
+```bash
+streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+```
+
+In the web app:
+1. Upload a BOM PDF.
+2. Set the **page range** and **company/format** in the sidebar.
+3. Flip **Enable Live Price Lookup** on or off (off = blank prices, fully offline).
+4. Click **Run Pipeline**, then download the resulting Excel files (extracted BOM,
+   BOM with prices, and the OMNI cost sheet) from the side-by-side buttons.
+
+> **Note:** Streamlit is not bundled by PyInstaller — the web app is *served*, not
+> shipped as an `.exe`. Only the desktop GUI (Option B) is packaged into the executable.
+
+### Option B — Desktop GUI (Tkinter)
+
+Best for standalone use on a single machine, and the basis for the `.exe` build.
 
 ```bash
 python src/gui/BoMinationApp.py
 ```
+
+Select the PDF, page range, company, and toggle **Enable Live Price Lookup**
+(Step 4), then click **Run Automation**. Output files are written next to the
+source PDF.
 
 ### Environment Variables
 
@@ -119,7 +156,9 @@ Configurable in the **Settings** tab:
 python build_pyinstaller.py
 ```
 
-The output `.exe` is a self-contained portable application (~90 MB) that requires no Python installation.
+This packages the **desktop GUI** (Option B) into a self-contained portable `.exe`
+(~90 MB) that requires no Python installation. The Streamlit web app (Option A) is
+not part of the executable — it is run directly with `streamlit run app.py`.
 
 ## Sales Team Deployment
 
