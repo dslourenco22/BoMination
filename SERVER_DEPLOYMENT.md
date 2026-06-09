@@ -19,12 +19,12 @@ BoMination is an internal tool that extracts Bill of Materials (BOM) tables from
 
 ## How It Works (for IT)
 
-1. User uploads a PDF through a web page and specifies a page range
+1. User uploads a PDF through a web page and specifies a page range (and optionally a company format)
 2. The server extracts text from the PDF using **pdfplumber** (no internet required)
 3. The text is passed to **Ollama**, a locally-running AI model — **no data ever leaves the company network**
 4. The AI identifies and parses the BOM table
-5. Part numbers are searched on DuckDuckGo to find pricing (only part numbers are sent — no document content)
-6. The server generates up to 4 Excel files and returns a download link to the user
+5. **If the user enables price lookup**, part numbers are searched on DuckDuckGo to find pricing (only part numbers are sent — no document content). This is a toggle in the UI and can be left off for speed or compliance.
+6. The server generates the output Excel files (extracted BOM, BOM with prices, and the filled OMNI cost sheet) and returns download links to the user
 
 ---
 
@@ -50,7 +50,7 @@ All of the following is free and open-source:
 
 | Software | Purpose | Install |
 |---|---|---|
-| Python 3.10+ | Application runtime | python.org |
+| Python 3.10+ (3.12 recommended) | Application runtime | python.org |
 | Ollama | Local AI model server | ollama.com |
 | llama3.2 or llama3.2:1b | AI model for BOM extraction | `ollama pull llama3.2` |
 | All Python packages | Listed in `requirements.txt` | `pip install -r requirements.txt` |
@@ -114,7 +114,7 @@ pip install -r requirements.txt
 
 ### 4. Launch the web interface
 ```bash
-streamlit run src/web/app.py --server.port 8501 --server.address 0.0.0.0
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 ```
 
 Users then navigate to `http://<server-ip>:8501` from any browser on the internal network.
@@ -127,7 +127,7 @@ Description=BoMination BOM Tool
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/streamlit run /opt/bomination/src/web/app.py --server.port 8501 --server.address 0.0.0.0
+ExecStart=/usr/bin/streamlit run /opt/bomination/app.py --server.port 8501 --server.address 0.0.0.0
 WorkingDirectory=/opt/bomination
 Restart=always
 User=bomination
@@ -150,18 +150,23 @@ WantedBy=multi-user.target
 
 ---
 
-## What Needs to Be Built (Development Work)
+## Application Status (Development Work)
 
-The current application is a desktop GUI (tkinter). The core extraction pipeline is already separate from the UI and requires no changes. What needs to be built is a **Streamlit web frontend** to replace the desktop window. Estimated effort: **2–3 days**.
+The **Streamlit web frontend is already built** — it lives at `app.py` in the repo root and is ready to deploy with `streamlit run app.py`. No further frontend development is required to launch.
 
-The web interface will provide:
+The web interface provides:
 - PDF file upload
 - Page range input
-- Company/customer selector dropdown
-- Progress indicator while processing
-- Download buttons for the generated Excel files
+- Company/customer selector dropdown (leave blank for automatic, format-agnostic extraction)
+- **"Enable Live Price Lookup" toggle** — turn pricing on or off per run
+- Live progress indicator while processing
+- Side-by-side download buttons for the generated Excel files
 
-The pipeline code (`extract_main.py`, `map_cost_sheet.py`, `lookup_price.py`) runs unchanged on the server.
+Both frontends share the same pipeline code (`extract_main.py`, `map_cost_sheet.py`, `lookup_price.py`), which runs unchanged on the server:
+- **`app.py`** — the Streamlit web app (this deployment)
+- **`src/gui/BoMinationApp.py`** — the legacy desktop GUI, still used to build the standalone `.exe` for offline single-machine use
+
+> The desktop `.exe` is **not** part of the server deployment — the server only runs the Streamlit app. The `.exe` remains available for users who need a fully offline, standalone tool.
 
 ---
 
@@ -171,7 +176,7 @@ The pipeline code (`extract_main.py`, `map_cost_sheet.py`, `lookup_price.py`) ru
 - Uploaded PDFs are processed in memory and written to a temporary output directory — they are not stored permanently
 - No PDF content or document text is sent outside the company network
 - Only manufacturer part numbers are sent externally (to DuckDuckGo for pricing)
-- If price lookup needs to be disabled for compliance, it can be turned off with a single environment variable
+- Price lookup can be disabled per run via the **"Enable Live Price Lookup" toggle** in the UI — when off, no outbound web requests are made at all and cost columns are left blank
 
 ---
 
