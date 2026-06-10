@@ -3,12 +3,16 @@ BoMination — Streamlit web frontend
 
 Upload one or more BOM PDFs, configure extraction settings, and download the
 filled OMNI cost sheet for each. Page ranges can be auto-detected per file.
+
+NOTE: This file is the presentation layer only. All extraction, pricing, and
+cost-sheet logic lives in src/pipeline/* and is called unchanged.
 """
 
 import streamlit as st
 import sys
 import os
 import io
+import base64
 import zipfile
 import tempfile
 import pandas as pd
@@ -22,92 +26,216 @@ if str(SRC) not in sys.path:
 
 # ── Page config (must be the first Streamlit call) ─────────────────────────────
 st.set_page_config(
-    page_title="BoMination",
+    page_title="BoMination · OMNI",
     page_icon=str(ROOT / "logo.jpeg") if (ROOT / "logo.jpeg").exists() else None,
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── Logo ───────────────────────────────────────────────────────────────────────
+# ── Brand assets ───────────────────────────────────────────────────────────────
 _logo = ROOT / "logo.jpeg"
 if _logo.exists():
     st.logo(str(_logo), size="large")
 
-# ── Theme / CSS ────────────────────────────────────────────────────────────────
-ACCENT = "#2F6FED"
 
-st.markdown(f"""
+@st.cache_data
+def _logo_data_uri():
+    """Base64 data URI for the logo so it can be embedded in the header card."""
+    if not _logo.exists():
+        return ""
+    return "data:image/jpeg;base64," + base64.b64encode(_logo.read_bytes()).decode()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DESIGN SYSTEM  (OMNI brand: cobalt #1E50E0, amber #F5A623, ink #0F1B33)
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown("""
 <style>
-    :root {{ --accent: {ACCENT}; }}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-    .block-container {{
-        padding-top: 2rem !important;
-        max-width: 1180px;
-    }}
+:root {
+    --brand:        #1E50E0;   /* OMNI cobalt           */
+    --brand-strong: #1A45C7;
+    --brand-soft:   #EAF0FE;
+    --amber:        #F5A623;   /* OMNI ring accent      */
+    --amber-soft:   #FEF3DD;
+    --ink:          #0F1B33;   /* deep navy text        */
+    --muted:        #5B6780;   /* secondary text        */
+    --faint:        #8A94A8;
+    --surface:      #FFFFFF;
+    --canvas:       #F5F7FB;
+    --border:       #E6EAF2;
+    --border-strong:#D6DCE8;
+    --shadow-sm: 0 1px 2px rgba(15,27,51,.06), 0 1px 3px rgba(15,27,51,.04);
+    --shadow-md: 0 4px 12px rgba(15,27,51,.08), 0 2px 4px rgba(15,27,51,.04);
+    --shadow-lg: 0 12px 32px rgba(15,27,51,.12);
+    --radius: 14px;
+    --radius-sm: 10px;
+    --ease: cubic-bezier(.4,0,.2,1);
+}
 
-    /* Masthead */
-    .app-title {{
-        font-size: 2.4rem;
-        font-weight: 700;
-        letter-spacing: -0.02em;
-        margin-bottom: 0.15rem;
-    }}
-    .app-subtitle {{
-        font-size: 1.02rem;
-        opacity: 0.62;
-        font-weight: 400;
-        margin-bottom: 0.25rem;
-    }}
-    .accent-rule {{
-        height: 3px;
-        width: 64px;
-        background: var(--accent);
-        border-radius: 2px;
-        margin: 0.65rem 0 1.4rem 0;
-    }}
+/* ── Typography ─────────────────────────────────────────────────────────────*/
+html, body, [class*="css"], .stMarkdown, button, input, textarea, select {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+    -webkit-font-smoothing: antialiased;
+    color: var(--ink);
+}
 
-    /* Section eyebrow labels */
-    .eyebrow {{
-        font-size: 0.72rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
-        opacity: 0.55;
-        margin-bottom: 0.5rem;
-    }}
+/* ── App canvas ─────────────────────────────────────────────────────────────*/
+[data-testid="stAppViewContainer"] { background: var(--canvas); }
+.block-container {
+    padding-top: 1.5rem !important;
+    padding-bottom: 4rem !important;
+    max-width: 1200px;
+    animation: fadeUp .5s var(--ease) both;
+}
+@keyframes fadeUp { from { opacity:0; transform: translateY(8px);} to {opacity:1; transform:none;} }
 
-    /* Pipeline step list */
-    .step-list {{
-        margin: 0;
-        padding-left: 1.15rem;
-        line-height: 2.05;
-        font-size: 0.95rem;
-    }}
-    .step-skip {{ opacity: 0.45; }}
+/* ── Branded header card ────────────────────────────────────────────────────*/
+.brand-header {
+    display: flex; align-items: center; gap: 18px;
+    background: linear-gradient(135deg, #ffffff 0%, #fbfcff 100%);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    padding: 20px 26px;
+    margin-bottom: 26px;
+    position: relative; overflow: hidden;
+}
+.brand-header::before {
+    content:""; position:absolute; left:0; top:0; bottom:0; width:5px;
+    background: linear-gradient(180deg, var(--brand) 0%, var(--amber) 100%);
+}
+.brand-header img { height: 52px; width:auto; border-radius: 8px; }
+.brand-titles { display:flex; flex-direction:column; }
+.brand-title {
+    font-size: 1.85rem; font-weight: 800; letter-spacing: -.025em;
+    line-height: 1.1; color: var(--ink);
+}
+.brand-title .accent { color: var(--brand); }
+.brand-sub { font-size: .95rem; color: var(--muted); font-weight: 450; margin-top: 2px; }
+.brand-spacer { flex: 1; }
+.brand-chip {
+    font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--brand); background: var(--brand-soft);
+    padding: 6px 12px; border-radius: 999px; border: 1px solid #d7e2fd;
+}
 
-    /* Status pills */
-    .pill {{
-        display: inline-block;
-        padding: 3px 12px;
-        border-radius: 999px;
-        font-size: 0.78rem;
-        font-weight: 600;
-        letter-spacing: 0.01em;
-    }}
-    .pill-on  {{ background: rgba(47,111,237,0.14);  color: #2F6FED; }}
-    .pill-off {{ background: rgba(120,120,120,0.16); color: #9aa0a6; }}
+/* ── Eyebrow section labels ─────────────────────────────────────────────────*/
+.eyebrow {
+    font-size: .72rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .12em; color: var(--faint); margin: 2px 0 10px;
+}
 
-    /* Primary button */
-    .stButton > button[kind="primary"] {{
-        background: var(--accent);
-        border: none;
-        font-weight: 600;
-        letter-spacing: 0.02em;
-        border-radius: 8px;
-        padding: 0.55rem 0;
-    }}
+/* ── Cards / bordered containers ────────────────────────────────────────────*/
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background: var(--surface);
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius) !important;
+    box-shadow: var(--shadow-sm);
+    transition: box-shadow .2s var(--ease), transform .2s var(--ease), border-color .2s var(--ease);
+}
+[data-testid="stVerticalBlockBorderWrapper"]:hover {
+    box-shadow: var(--shadow-md);
+    border-color: var(--border-strong) !important;
+}
 
-    hr {{ border-color: rgba(140,140,140,0.18) !important; }}
+/* ── Sidebar ────────────────────────────────────────────────────────────────*/
+[data-testid="stSidebar"] {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+}
+[data-testid="stSidebar"] .block-container { padding-top: 1rem !important; }
+
+/* ── Pipeline step list ─────────────────────────────────────────────────────*/
+.step-list { margin: 0; padding-left: 1.15rem; line-height: 2.1; font-size: .94rem; color: var(--ink); }
+.step-list li::marker { color: var(--brand); font-weight: 700; }
+.step-skip { opacity: .42; }
+
+/* ── Status pills ───────────────────────────────────────────────────────────*/
+.pill {
+    display:inline-flex; align-items:center; gap:7px;
+    padding: 5px 13px; border-radius: 999px;
+    font-size: .8rem; font-weight: 650; letter-spacing: .005em;
+}
+.pill::before { content:""; width:7px; height:7px; border-radius:50%; }
+.pill-on  { background: var(--brand-soft); color: var(--brand-strong); }
+.pill-on::before  { background: var(--brand); box-shadow: 0 0 0 3px rgba(30,80,224,.15); }
+.pill-off { background: #EEF1F6; color: var(--muted); }
+.pill-off::before { background: var(--faint); }
+
+/* ── Buttons ────────────────────────────────────────────────────────────────*/
+.stButton > button, .stDownloadButton > button {
+    border-radius: var(--radius-sm) !important;
+    font-weight: 650 !important;
+    letter-spacing: .01em;
+    transition: all .18s var(--ease) !important;
+    border: 1px solid var(--border-strong);
+    box-shadow: var(--shadow-sm);
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+.stButton > button:active, .stDownloadButton > button:active { transform: translateY(0); }
+
+/* Primary action — brand gradient */
+.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
+    background: linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%) !important;
+    border: none !important;
+    color: #fff !important;
+    padding: .62rem 0 !important;
+    box-shadow: 0 4px 14px rgba(30,80,224,.30) !important;
+}
+.stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {
+    box-shadow: 0 8px 22px rgba(30,80,224,.38) !important;
+}
+.stButton > button[kind="primary"]:disabled {
+    background: #C7D0E4 !important; box-shadow:none !important; color:#fff !important;
+}
+
+/* ── Inputs ─────────────────────────────────────────────────────────────────*/
+.stTextInput input, [data-baseweb="select"] > div {
+    border-radius: var(--radius-sm) !important;
+    border-color: var(--border-strong) !important;
+    transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
+}
+.stTextInput input:focus, [data-baseweb="select"] > div:focus-within {
+    border-color: var(--brand) !important;
+    box-shadow: 0 0 0 3px rgba(30,80,224,.14) !important;
+}
+
+/* ── File uploader (dropzone) ───────────────────────────────────────────────*/
+[data-testid="stFileUploaderDropzone"] {
+    background: var(--brand-soft) !important;
+    border: 1.5px dashed #B9CBF8 !important;
+    border-radius: var(--radius) !important;
+    transition: all .18s var(--ease);
+}
+[data-testid="stFileUploaderDropzone"]:hover {
+    border-color: var(--brand) !important;
+    background: #E3ECFE !important;
+}
+
+/* ── Expander ───────────────────────────────────────────────────────────────*/
+[data-testid="stExpander"] details {
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+}
+
+/* ── Progress + toggle accents ──────────────────────────────────────────────*/
+[data-testid="stProgress"] > div > div > div { background: var(--brand) !important; }
+
+/* ── Misc ───────────────────────────────────────────────────────────────────*/
+hr { border-color: var(--border) !important; }
+[data-testid="stCaptionContainer"], .stCaption { color: var(--muted) !important; }
+
+/* Hide Streamlit's default chrome for a clean internal-app shell */
+#MainMenu, footer { visibility: hidden; }
+[data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"] { display: none !important; }
+[data-testid="stHeader"] { background: transparent !important; height: 0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -175,17 +303,27 @@ with st.sidebar:
         st.caption("No web requests. Cost columns are left empty.")
 
     st.divider()
-    st.caption("BoMination · OMNI Internal")
+    st.caption("BoMination · OMNI Control Technology")
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MASTHEAD
+#  BRANDED HEADER
 # ══════════════════════════════════════════════════════════════════════════════
-st.markdown("<div class='app-title'>BoMination</div>", unsafe_allow_html=True)
+_logo_uri = _logo_data_uri()
+_logo_img = f"<img src='{_logo_uri}' alt='OMNI'/>" if _logo_uri else ""
 st.markdown(
-    "<div class='app-subtitle'>AI-powered Bill of Materials extraction from technical PDFs</div>",
+    f"""
+    <div class="brand-header">
+        {_logo_img}
+        <div class="brand-titles">
+            <div class="brand-title">Bo<span class="accent">Mination</span></div>
+            <div class="brand-sub">AI-powered Bill of Materials extraction · OMNI Control Technology</div>
+        </div>
+        <div class="brand-spacer"></div>
+        <div class="brand-chip">Internal Tool</div>
+    </div>
+    """,
     unsafe_allow_html=True,
 )
-st.markdown("<div class='accent-rule'></div>", unsafe_allow_html=True)
 
 # ── Upload + overview ──────────────────────────────────────────────────────────
 col_upload, col_info = st.columns([3, 2], gap="large")

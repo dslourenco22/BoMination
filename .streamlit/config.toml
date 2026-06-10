@@ -1,0 +1,15 @@
+# BoMination — OMNI Control Technology brand theme
+# Cobalt blue primary, amber accent, deep-navy ink on a soft off-white surface.
+[theme]
+primaryColor = "#1E50E0"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F7FB"
+textColor = "#0F1B33"
+font = "sans serif"
+
+[server]
+# Friendlier for an internal LAN deployment
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false

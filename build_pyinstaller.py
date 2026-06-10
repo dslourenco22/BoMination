@@ -158,6 +158,8 @@ def build_app():
         f'--add-data={cost_sheet_path};Files',  # Include cost sheet template
         f'--add-data={src_dir};src',  # Include all source files
         f'--add-data={assets_dir};assets',  # Include assets (icon)
+        f'--add-data={current_dir / "logo.jpeg"};.',  # Include brand logo for the header
+        '--hidden-import=PIL._tkinter_finder',  # PIL/Tk image loading for the logo
         '--hidden-import=ttkbootstrap',
         '--hidden-import=selenium',
         '--hidden-import=pandas',

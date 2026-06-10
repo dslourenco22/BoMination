@@ -32,6 +32,11 @@ import threading
 _PRICE_CACHE = {}
 _CACHE_LOCK = threading.Lock()
 
+# Silence the per-request HTTP chatter from the search stack (primp/ddgs/etc.)
+import logging
+for _noisy in ('primp', 'ddgs', 'duckduckgo_search', 'httpx', 'httpcore', 'urllib3'):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 OEM_COLUMNS = [
     'Internal Reference', 'Part Number', 'Quantity for Single BOM',
     'Extended Quantity for 1 BOM', 'Manufacturer', 'Distributor',
@@ -132,6 +137,40 @@ def _parse_prices(text):
     return sorted(found)
 
 
+def _median(vals):
+    s = sorted(vals)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def _consensus_price(prices):
+    """Pick a robust price from the candidate values found in search snippets.
+
+    Search results mix the real part price — which tends to *cluster*, since
+    several distributors list a similar number — with noise (accessories,
+    shipping, quantities, unrelated items). Strategy:
+      1. anchor on the median (robust to outliers),
+      2. drop values that are wildly off it (a cheap accessory next to a
+         big-ticket item, or a typo'd price many times too large),
+      3. average the agreeing cluster.
+    Returns a float, or None if there were no usable prices.
+    """
+    vals = sorted(p for p in prices if p and p > 0)
+    if not vals:
+        return None
+    if len(vals) <= 2:
+        # Too few to vote — median (= the value itself, or the mean of two)
+        return round(_median(vals), 2)
+    med = _median(vals)
+    # Keep prices within a ratio band of the median. Ratio (not absolute) so it
+    # works across the huge price range of BOM parts ($1 fuses → $15k drives).
+    kept = [p for p in vals if 0.4 * med <= p <= 2.5 * med]
+    if len(kept) < 2:
+        kept = [med]
+    return round(sum(kept) / len(kept), 2)
+
+
 # ── Web price sources ─────────────────────────────────────────────────────────
 
 def _ddg_price(pn, mfr):
@@ -159,6 +198,9 @@ def _ddg_price(pn, mfr):
         f'{prefix}{pn} price buy distributor',
         f'"{pn}" price USD',
     ]
+    # Gather price candidates across BOTH queries, then vote — more samples
+    # means we can spot the consistent cluster and drop wild outliers.
+    all_prices = []
     for q in queries:
         try:
             with DDGS(timeout=12) as ddgs:
@@ -167,9 +209,9 @@ def _ddg_price(pn, mfr):
                 combined = ' '.join(
                     f"{r.get('title','')} {r.get('body','')}" for r in results
                 )
-                prices = _parse_prices(combined)
-                if prices:
-                    return prices[0], 'web search'
+                all_prices.extend(_parse_prices(combined))
+            if len(all_prices) >= 5:
+                break  # enough samples to form a reliable consensus
         except Exception as e:
             name, msg = type(e).__name__, str(e)
             print(f'  [DDG] query failed: {name}: {msg[:120]}')
@@ -177,6 +219,13 @@ def _ddg_price(pn, mfr):
             if 'ratelimit' in name.lower() or 'rate' in msg.lower() or '202' in msg:
                 time.sleep(3.0)
         time.sleep(0.6)
+
+    price = _consensus_price(all_prices)
+    if price:
+        if len(all_prices) > 1:
+            sample = sorted({round(p, 2) for p in all_prices})[:8]
+            print(f'  [WEB] {len(all_prices)} candidates {sample} → consensus ${price:.2f}')
+        return price, 'web search'
     return None
 
 
@@ -250,22 +299,20 @@ def _ollama_knowledge_price(pn, mfr, desc, qty=1):
 
 def _lookup_one(pn, mfr, desc, qty, label):
     """
-    Try web sources in parallel, fall back to Ollama knowledge. (LD)
+    Web search first, fall back to an Ollama estimate. (LD)
     Always returns (price, distributor, notes).
+
+    Note: direct Grainger/McMaster scraping was removed — they return HTTP 403 /
+    bot-detection pages every time and never yielded a price. DuckDuckGo (via the
+    ddgs package, which itself aggregates several engines) is the web source.
     """
-    # Run DDG and direct-site in parallel
     web_price, web_source = None, None
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        f_ddg    = ex.submit(_ddg_price,    pn, mfr)
-        f_direct = ex.submit(_direct_price, pn, mfr)
-        for f in as_completed([f_ddg, f_direct], timeout=20):
-            try:
-                result = f.result()
-                if result:
-                    web_price, web_source = result
-                    break
-            except Exception:
-                pass
+    try:
+        result = _ddg_price(pn, mfr)
+        if result:
+            web_price, web_source = result
+    except Exception as e:
+        print(f'  [WEB] lookup error for {label}: {e}')
 
     if web_price:
         print(f'  [WEB:{web_source}] ${web_price:.2f} for {label}')

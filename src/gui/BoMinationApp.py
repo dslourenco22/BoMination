@@ -414,7 +414,48 @@ class BoMApp:
         
         # Build settings tab content
         self.settings_tab_instance = SettingsTab(settings_tab, self)
-    
+
+    def _build_brand_header(self, parent):
+        """OMNI-branded header: logo + product title + subtitle + accent rule."""
+        header = ttk.Frame(parent)
+        header.pack(fill=X, pady=(0, 12))
+
+        # Locate the logo (works both in dev and inside the frozen .exe)
+        candidates = []
+        if getattr(sys, 'frozen', False):
+            candidates += [Path(sys._MEIPASS) / "logo.jpeg",
+                           Path(sys._MEIPASS) / "assets" / "logo.jpeg"]
+        root_dir = Path(__file__).parent.parent.parent
+        candidates += [root_dir / "logo.jpeg", root_dir / "assets" / "logo.jpeg"]
+
+        logo_path = next((c for c in candidates if c.exists()), None)
+        if logo_path is not None:
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(str(logo_path))
+                target_h = 50
+                w, h = img.size
+                img = img.resize((int(w * target_h / h), target_h), Image.Resampling.LANCZOS)
+                self._brand_logo_img = ImageTk.PhotoImage(img)   # keep a ref alive
+                ttk.Label(header, image=self._brand_logo_img).pack(side=LEFT, padx=(0, 16))
+            except Exception as e:
+                print(f"[BRAND] Could not load logo: {e}")
+
+        titles = ttk.Frame(header)
+        titles.pack(side=LEFT, anchor=W)
+        ttk.Label(
+            titles, text="BoMination",
+            font=("Segoe UI Semibold", 22, "bold")
+        ).pack(anchor=W)
+        ttk.Label(
+            titles,
+            text="Bill of Materials extraction · OMNI Control Technology",
+            font=("Segoe UI", 10), bootstyle="secondary"
+        ).pack(anchor=W)
+
+        # Brand accent rule under the header
+        ttk.Separator(parent, bootstyle="info").pack(fill=X, pady=(0, 18))
+
     def build_main_tab(self, main_container):
         """Build the main tab interface."""
         # Use a scrollable container so every step AND the Run button stay
@@ -427,22 +468,9 @@ class BoMApp:
             main_container_padded = ttk.Frame(main_container)
             main_container_padded.pack(fill=BOTH, expand=True, padx=20, pady=20)
         
-        # Title with modern styling
-        title_label = ttk.Label(
-            main_container_padded, 
-            text="BoMination", 
-            font=("Segoe UI", 24, "bold")
-        )
-        title_label.pack(pady=(0, 5))
-        
-        subtitle_label = ttk.Label(
-            main_container_padded, 
-            text="BoM Processing Pipeline", 
-            font=("Segoe UI", 12),
-            bootstyle="secondary"
-        )
-        subtitle_label.pack(pady=(0, 30))
-        
+        # Branded header: OMNI logo + product title + subtitle, with an accent rule
+        self._build_brand_header(main_container_padded)
+
         # Step 1: PDF File Selection (one or many)
         pdf_frame = ttk.LabelFrame(main_container_padded, text="Step 1: Select BoM PDF File(s)", padding=15)
         pdf_frame.pack(fill=X, pady=(0, 15))
