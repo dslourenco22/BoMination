@@ -214,19 +214,21 @@ def _ddg_price(pn, mfr):
 
     skip = {'', 'n/a', 'nan', 'none', 'generic'}
     prefix = f'{mfr} ' if mfr.lower() not in skip else ''
-    # One focused query (fewer requests = faster and less rate-limiting); a
-    # quoted fallback only if the first comes back empty.
+    # Several query phrasings so stubborn parts still get a *web* price instead
+    # of falling through to a (slow, less accurate) AI estimate. We stop early
+    # once we have enough candidates, so common parts still finish on query 1.
     queries = [
         f'{prefix}{pn} price buy distributor',
         f'"{pn}" price USD',
+        f'{prefix}{pn} buy online price',
     ]
-    # Gather price candidates across BOTH queries, then vote — more samples
-    # means we can spot the consistent cluster and drop wild outliers.
+    # Pull MORE results per request (free — one request, more snippets) so each
+    # query yields more price candidates and we find a real price more often.
     all_prices = []
-    for q in queries:
+    for i, q in enumerate(queries):
         try:
             with DDGS(timeout=12) as ddgs:
-                results = list(ddgs.text(q, max_results=6))
+                results = list(ddgs.text(q, max_results=12))
             if results:
                 combined = ' '.join(
                     f"{r.get('title','')} {r.get('body','')}" for r in results
@@ -240,7 +242,9 @@ def _ddg_price(pn, mfr):
             # Back off harder when we are being rate limited
             if 'ratelimit' in name.lower() or 'rate' in msg.lower() or '202' in msg:
                 time.sleep(3.0)
-        time.sleep(0.6)
+        # brief pause only BETWEEN queries, never after the last one
+        if i < len(queries) - 1:
+            time.sleep(0.4)
 
     price = _consensus_price(all_prices)
     if price:
@@ -369,6 +373,17 @@ def lookup_prices_for_bom(df):
     print(f'[PRICE] {n} parts | MPN={pn_col} MFR={mfr_col} DESC={desc_col} QTY={qty_col} '
           f'| {MAX_WORKERS} workers')
 
+    # Optional purchasing discount applied to every looked-up price before it
+    # reaches the cost sheet (e.g. team gets 18% off list → BOM_DISCOUNT_PCT=18).
+    try:
+        discount_pct = float(os.environ.get('BOM_DISCOUNT_PCT', '0') or '0')
+    except ValueError:
+        discount_pct = 0.0
+    discount_pct = min(max(discount_pct, 0.0), 95.0)
+    discount_factor = 1.0 - discount_pct / 100.0
+    if discount_pct:
+        print(f'[PRICE] Applying {discount_pct:.1f}% discount to every priced part')
+
     skip_vals = {'', 'n/a', 'nan', 'none'}
     rows_out = [None] * n            # preserve original row order
     tasks = []                       # parts that actually need a lookup
@@ -419,7 +434,7 @@ def lookup_prices_for_bom(df):
                 continue
             done += 1
             if price:
-                rows_out[i]['Unit Price in USD'] = round(price, 2)
+                rows_out[i]['Unit Price in USD'] = round(price * discount_factor, 2)
                 rows_out[i]['Distributor']       = dist or 'N/A'
                 rows_out[i]['Notes']             = notes
             tag = ' (cached)' if was_cached else ''

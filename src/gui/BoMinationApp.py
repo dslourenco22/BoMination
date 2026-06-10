@@ -381,6 +381,9 @@ class BoMApp:
         # Live price lookup toggle (ON = web search + AI estimate; OFF = blank prices)
         self.enable_prices = tk.BooleanVar(value=True)
 
+        # Purchasing discount % taken off every looked-up price (0 = none)
+        self.discount_pct = tk.StringVar(value="0")
+
         # Cost sheet output: custom file name and destination folder
         self.cost_sheet_name = tk.StringVar()  # e.g. "Main Panel Cost Sheet.xlsx"
 
@@ -593,6 +596,18 @@ class BoMApp:
             justify="left"
         )
         self.price_info_label.pack(anchor=W, pady=(5, 0))
+
+        # Purchasing discount — subtracted from every looked-up price
+        discount_row = ttk.Frame(price_frame)
+        discount_row.pack(fill=X, pady=(10, 0))
+        ttk.Label(discount_row, text="Purchasing discount:", font=("Segoe UI", 10)).pack(side=LEFT)
+        ttk.Entry(
+            discount_row, textvariable=self.discount_pct, width=6, font=("Segoe UI", 10)
+        ).pack(side=LEFT, padx=(8, 4))
+        ttk.Label(
+            discount_row, text="%   (taken off each price before the cost sheet)",
+            font=("Segoe UI", 9), bootstyle="secondary"
+        ).pack(side=LEFT)
 
         # Step 5: Output (cost sheet file name + destination folder)
         output_frame = ttk.LabelFrame(main_container_padded, text="Step 5: Output Cost Sheet", padding=15)
@@ -932,6 +947,7 @@ Invalid formats:
         os.environ["BOM_COMPANY"] = company
         os.environ["BOM_OUTPUT_DIRECTORY"] = self.output_directory.get() or ""
         os.environ["BOM_USE_ROI"] = str(self.use_roi.get()).lower()
+        os.environ["BOM_DISCOUNT_PCT"] = (self.discount_pct.get().strip() or "0")
 
         self.add_log_message(f"[DEBUG] Environment variables set:", "info")
         self.add_log_message(f"[DEBUG] BOM_PDF_PATH: {os.environ.get('BOM_PDF_PATH')}", "info")

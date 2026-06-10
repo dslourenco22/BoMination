@@ -295,9 +295,18 @@ with st.sidebar:
             "cost columns blank — faster and fully offline."
         ),
     )
+    discount_pct = 0.0
     if enable_prices:
         st.markdown("<span class='pill pill-on'>Live lookup enabled</span>", unsafe_allow_html=True)
         st.caption("Web search and AI estimate will run for every part.")
+        discount_pct = st.number_input(
+            "Purchasing discount %",
+            min_value=0.0, max_value=95.0, value=0.0, step=1.0,
+            help="Subtracted from every looked-up price before it reaches the cost sheet. "
+                 "e.g. enter 18 if purchasing averages 18% off list price.",
+        )
+        if discount_pct:
+            st.caption(f"Each price reduced by {discount_pct:.0f}% before the cost sheet.")
     else:
         st.markdown("<span class='pill pill-off'>Offline — prices blank</span>", unsafe_allow_html=True)
         st.caption("No web requests. Cost columns are left empty.")
@@ -408,6 +417,9 @@ if st.button("Run Pipeline", type="primary", use_container_width=True, disabled=
 
             results, errors = {}, []
             progress = st.progress(0.0)
+
+            # Purchasing discount → applied to every looked-up price by the backend
+            os.environ["BOM_DISCOUNT_PCT"] = str(discount_pct)
 
             with tempfile.TemporaryDirectory() as _tmpdir:
                 tmpdir = Path(_tmpdir)
