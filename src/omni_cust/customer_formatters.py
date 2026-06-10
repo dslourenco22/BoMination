@@ -415,10 +415,12 @@ _MFR_HINTS = {
 
 # Marker that commonly precedes a manufacturer part number inside a description
 # cell, e.g. "Cat. No. ...", "Cat No: ...", "Part No. ...", "P/N ...".
+# NOTE the \b word boundaries — without them "cat" matches INSIDE words like
+# "COMMUNICATIONS" or "LOCATION" and grabs garbage before the real "Cat. No.".
 _DESC_MARKER_RE = re.compile(
-    r'(?:cat(?:alog)?\.?\s*(?:no|number|#)?\.?|'
-    r'(?:part|order|model|article)\s*(?:no|number|#)?\.?|'
-    r'p\s*/?\s*n)'
+    r'(?:\bcat(?:alog)?\b\.?\s*(?:no|number|#)?\.?'
+    r'|\b(?:part|order|model|article)\b\.?\s*(?:no|number|#)?\.?'
+    r'|\bp\s*/\s*n\b)'
     r'\s*[:.\-]?\s*',
     re.IGNORECASE,
 )
