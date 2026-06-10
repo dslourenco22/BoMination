@@ -24,7 +24,8 @@ odfpy
 
 # LLM + search
 ollama
-duckduckgo-search
+ddgs                 # maintained DuckDuckGo search (replaces duckduckgo-search)
+duckduckgo-search    # legacy fallback name
 requests
 
 # Legacy extractors (optional — replaced by Ollama pipeline)

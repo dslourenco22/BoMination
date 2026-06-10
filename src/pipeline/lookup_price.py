@@ -23,6 +23,15 @@ MODEL      = os.environ.get('BOM_LLM_MODEL',      'llama3.2')
 OLLAMA_HOST = os.environ.get('BOM_LLM_ENDPOINT', 'http://127.0.0.1:11434')
 SEARCH_DELAY = 0.5   # seconds between parts (reduced — Ollama is local)
 
+# Parts are looked up concurrently. More workers = faster, but more parallel
+# DuckDuckGo requests (which can increase rate-limiting). Tune via env var.
+MAX_WORKERS = max(1, int(os.environ.get('BOM_PRICE_WORKERS', '6')))
+
+# Cache by (part number, manufacturer) so repeated parts in a BOM are instant.
+import threading
+_PRICE_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+
 OEM_COLUMNS = [
     'Internal Reference', 'Part Number', 'Quantity for Single BOM',
     'Extended Quantity for 1 BOM', 'Manufacturer', 'Distributor',
@@ -126,32 +135,48 @@ def _parse_prices(text):
 # ── Web price sources ─────────────────────────────────────────────────────────
 
 def _ddg_price(pn, mfr):
-    """DuckDuckGo search → regex. Returns (price_float, 'DDG') or None."""
+    """DuckDuckGo search → regex. Returns (price_float, 'web search') or None.
+
+    Errors are logged (not swallowed) so the real reason for a miss — rate
+    limiting, an API change, no network — is visible in the console.
+    """
+    # The package was renamed duckduckgo_search → ddgs. Support both.
+    DDGS = None
     try:
-        from duckduckgo_search import DDGS
-        skip = {'', 'n/a', 'nan', 'none', 'generic'}
-        prefix = f'{mfr} ' if mfr.lower() not in skip else ''
-        queries = [
-            f'{prefix}{pn} price buy distributor',
-            f'"{pn}" price USD buy',
-            f'{prefix}{pn} price',
-        ]
-        for q in queries:
-            try:
-                with DDGS(timeout=12) as ddgs:
-                    results = list(ddgs.text(q, max_results=6))
-                if results:
-                    combined = ' '.join(
-                        f"{r.get('title','')} {r.get('body','')}" for r in results
-                    )
-                    prices = _parse_prices(combined)
-                    if prices:
-                        return prices[0], 'web search'
-            except Exception:
-                pass
-            time.sleep(0.5)
-    except Exception as e:
-        print(f'  [DDG] Error: {e}')
+        from ddgs import DDGS                      # newer maintained package
+    except Exception:
+        try:
+            from duckduckgo_search import DDGS     # legacy name
+        except Exception as e:
+            print(f'  [DDG] search library not available: {e}')
+            return None
+
+    skip = {'', 'n/a', 'nan', 'none', 'generic'}
+    prefix = f'{mfr} ' if mfr.lower() not in skip else ''
+    # One focused query (fewer requests = faster and less rate-limiting); a
+    # quoted fallback only if the first comes back empty.
+    queries = [
+        f'{prefix}{pn} price buy distributor',
+        f'"{pn}" price USD',
+    ]
+    for q in queries:
+        try:
+            with DDGS(timeout=12) as ddgs:
+                results = list(ddgs.text(q, max_results=6))
+            if results:
+                combined = ' '.join(
+                    f"{r.get('title','')} {r.get('body','')}" for r in results
+                )
+                prices = _parse_prices(combined)
+                if prices:
+                    return prices[0], 'web search'
+        except Exception as e:
+            name, msg = type(e).__name__, str(e)
+            print(f'  [DDG] query failed: {name}: {msg[:120]}')
+            # Back off harder when we are being rate limited
+            if 'ratelimit' in name.lower() or 'rate' in msg.lower() or '202' in msg:
+                time.sleep(3.0)
+        time.sleep(0.6)
     return None
 
 
@@ -174,15 +199,19 @@ def _direct_price(pn, mfr):
         ]
         for name, url in sites:
             try:
-                r = requests.get(url, headers=hdrs, timeout=10)
+                r = requests.get(url, headers=hdrs, timeout=6)
                 if r.status_code == 200:
                     prices = _parse_prices(r.text)
                     if prices:
                         return prices[0], name
-            except Exception:
-                pass
-    except Exception:
-        pass
+                    # 200 but no price usually means a bot-detection / JS page
+                    print(f'  [DIRECT:{name}] page returned, no price parsed (likely bot wall)')
+                else:
+                    print(f'  [DIRECT:{name}] HTTP {r.status_code}')
+            except Exception as e:
+                print(f'  [DIRECT:{name}] {type(e).__name__}: {str(e)[:80]}')
+    except Exception as e:
+        print(f'  [DIRECT] setup error: {e}')
     return None
 
 
@@ -265,20 +294,23 @@ def lookup_prices_for_bom(df):
         print('[PRICE] No MPN column found — skipping')
         return _build_empty_output(df)
 
-    print(f'[PRICE] {len(df)} parts | MPN={pn_col} MFR={mfr_col} DESC={desc_col} QTY={qty_col}')
+    n = len(df)
+    print(f'[PRICE] {n} parts | MPN={pn_col} MFR={mfr_col} DESC={desc_col} QTY={qty_col} '
+          f'| {MAX_WORKERS} workers')
 
-    rows_out = []
+    skip_vals = {'', 'n/a', 'nan', 'none'}
+    rows_out = [None] * n            # preserve original row order
+    tasks = []                       # parts that actually need a lookup
+
     for i, (_, row) in enumerate(df.iterrows()):
         pn   = str(row[pn_col]).strip()
         qty  = str(row[qty_col]).strip()  if qty_col  else '1'
         mfr  = str(row[mfr_col]).strip()  if mfr_col  else ''
         desc = str(row[desc_col]).strip() if desc_col else ''
+        mfr_disp = mfr if mfr.lower() not in skip_vals else ''
+        label    = f'{mfr_disp} {pn}'.strip() or f'row {i+1}'
 
-        skip_vals = {'', 'n/a', 'nan', 'none'}
-        mfr_disp  = mfr  if mfr.lower()  not in skip_vals else ''
-        label     = f'{mfr_disp} {pn}'.strip() or f'row {i+1}'
-
-        out = {
+        rows_out[i] = {
             'Internal Reference':                    '',
             'Part Number':                            pn,
             'Quantity for Single BOM':                qty,
@@ -290,25 +322,50 @@ def lookup_prices_for_bom(df):
             'Lead Time on Additional Stock in Weeks': 'N/A',
             'Notes':                                  '',
         }
+        if pn and pn.lower() not in skip_vals:
+            tasks.append((i, pn, mfr_disp, desc, qty, label))
 
-        if not pn or pn.lower() in skip_vals:
-            rows_out.append(out)
-            continue
+    def _worker(task):
+        i, pn, mfr_disp, desc, qty, label = task
+        key = (pn.lower(), mfr_disp.lower())
+        with _CACHE_LOCK:
+            cached = _PRICE_CACHE.get(key)
+        if cached is not None:
+            return i, cached, True
+        result = _lookup_one(pn, mfr_disp, desc, qty, label)   # (price, dist, notes)
+        with _CACHE_LOCK:
+            _PRICE_CACHE[key] = result
+        return i, result, False
 
-        print(f'  [{i+1}/{len(df)}] {label}')
-        price, dist, notes = _lookup_one(pn, mfr_disp, desc, qty, label)
-
-        if price:
-            out['Unit Price in USD'] = round(price, 2)
-            out['Distributor']       = dist or 'N/A'
-            out['Notes']             = notes
-
-        rows_out.append(out)
-        time.sleep(SEARCH_DELAY)
+    # Look up all parts concurrently — overlaps the slow web/Ollama waits.
+    done = 0
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        for fut in as_completed([ex.submit(_worker, t) for t in tasks]):
+            try:
+                i, (price, dist, notes), was_cached = fut.result()
+            except Exception as e:
+                print(f'  [PRICE] worker error: {e}')
+                continue
+            done += 1
+            if price:
+                rows_out[i]['Unit Price in USD'] = round(price, 2)
+                rows_out[i]['Distributor']       = dist or 'N/A'
+                rows_out[i]['Notes']             = notes
+            tag = ' (cached)' if was_cached else ''
+            print(f'  [{done}/{len(tasks)}] {rows_out[i]["Part Number"]}{tag}')
 
     result_df = pd.DataFrame(rows_out, columns=OEM_COLUMNS)
     found = (result_df['Unit Price in USD'] != '').sum()
-    print(f'[PRICE] Done — {found}/{len(result_df)} parts priced')
+    # How many were real web hits vs Ollama estimates?
+    web_sources = {'web search', 'Grainger', 'McMaster'}
+    web_n = result_df['Distributor'].isin(web_sources).sum()
+    est_n = (result_df['Distributor'] == 'estimate').sum()
+    print(f'[PRICE] Done — {found}/{len(result_df)} parts priced '
+          f'({web_n} from the web, {est_n} AI estimates)')
+    if web_n == 0 and est_n > 0:
+        print('[PRICE] WARNING: every price is an AI estimate — the web search '
+              'returned nothing. Check the [DDG]/[DIRECT] messages above for the '
+              'reason (rate limiting, no network, or internal part numbers).')
     return result_df
 
 
