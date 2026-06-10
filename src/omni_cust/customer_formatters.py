@@ -413,16 +413,17 @@ _MFR_HINTS = {
     'MERSEN', 'LITTELFUSE', 'SQUARE D', 'HONEYWELL', 'THOMAS AND BETTS', 'CLARION',
 }
 
-# Markers that commonly precede a manufacturer part number inside a description
-# cell, e.g. "Cat. No. 5SJ4111-8HG41", "Part No: 1034250", "P/N 6ES7155-6AU00".
-_DESC_MPN_RE = re.compile(
+# Marker that commonly precedes a manufacturer part number inside a description
+# cell, e.g. "Cat. No. ...", "Cat No: ...", "Part No. ...", "P/N ...".
+_DESC_MARKER_RE = re.compile(
     r'(?:cat(?:alog)?\.?\s*(?:no|number|#)?\.?|'
     r'(?:part|order|model|article)\s*(?:no|number|#)?\.?|'
     r'p\s*/?\s*n)'
-    r'\s*[:.\-]?\s*'
-    r'([A-Za-z0-9][A-Za-z0-9\-\./]{3,})',
+    r'\s*[:.\-]?\s*',
     re.IGNORECASE,
 )
+
+_TOKEN_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9\-\./]*')
 
 # Explicit "Vendor: X" / "Mfr: X" / "Manufacturer: X" labels inside descriptions.
 _DESC_MFR_RE = re.compile(
@@ -432,18 +433,64 @@ _DESC_MFR_RE = re.compile(
 )
 
 
+def _accumulate_pn(segment):
+    """Accumulate a part number from the start of `segment`: the first token,
+    plus any following part-number-like tokens (a number, or a short uppercase
+    code like 'IS'/'PB'). Stops at prose or punctuation. Returns '' if empty."""
+    parts = []
+    for raw in segment.split():
+        core = raw.strip(' .,;:()')
+        if not core or not _TOKEN_RE.fullmatch(core):
+            break
+        if not parts:
+            parts.append(core)                       # first token
+        elif re.search(r'\d', core) or re.fullmatch(r'[A-Z]{1,3}', core):
+            parts.append(core)                       # continuation
+        else:
+            break
+        if raw.rstrip().endswith((',', ';')):        # punctuation ends the number
+            break
+    return ' '.join(parts).strip()
+
+
 def _extract_mpn_from_text(text):
     """Pull a manufacturer part number out of a free-text description cell.
-    Handles 'Cat. No. X', 'Cat No: X', 'Part No. X', 'P/N X', 'Order No X', etc.
-    Returns '' if nothing part-number-like is found."""
+
+    Cases, in order:
+      1. A marker like "Cat. No. X" / "Part No: X" / "P/N X". The number may span
+         several tokens (e.g. "IS 83875", "IS 6010 PB").
+      2. A marker is present but nothing usable follows it — the number is likely
+         at the START of the description (e.g. "IS 83875 SAFETY LABEL ... Cat. No.").
+         We accept a leading sequence that has BOTH a letter and a digit, so we
+         don't grab a bare item number like "45767".
+      3. No marker at all — accept a leading token only if it clearly looks like a
+         part number (letters+digits and a hyphen/slash, or 8+ chars), so we don't
+         grab ratings ("120VAC") or dimensions ("2.25").
+
+    Returns '' if nothing part-number-like is found.
+    """
     if not text:
         return ''
-    m = _DESC_MPN_RE.search(str(text))
+    s = str(text)
+
+    # ── Case 1: marker-based, multi-token aware ────────────────────────────────
+    m = _DESC_MARKER_RE.search(s)
     if m:
-        cand = m.group(1).strip(' .,;:')
-        # A real part number has a digit and is 4+ chars (skips words like 'EACH')
+        cand = _accumulate_pn(s[m.end():])
         if len(cand) >= 4 and re.search(r'\d', cand):
             return cand
+        # ── Case 2: marker present but empty → look at the start ───────────────
+        lead = _accumulate_pn(s)
+        if (len(lead) >= 4 and re.search(r'\d', lead) and re.search(r'[A-Za-z]', lead)):
+            return lead
+
+    # ── Case 3: part number leads the description, no marker ───────────────────
+    for raw in re.split(r'[\s,;]+', s.strip())[:3]:
+        t = raw.strip('.,;:()')
+        if (4 <= len(t) <= 30 and re.search(r'\d', t) and re.search(r'[A-Za-z]', t)
+                and _TOKEN_RE.fullmatch(t)
+                and ('-' in t or '/' in t or len(t) >= 8)):
+            return t
     return ''
 
 
