@@ -28,6 +28,11 @@ SEARCH_DELAY = 0.5   # seconds between parts (reduced — Ollama is local)
 # number with a decimal) — not a price. Raise via env if you stock $50k+ items.
 PRICE_CAP = float(os.environ.get('BOM_MAX_PRICE', '50000'))
 
+# Model used for the Ollama price *estimate* fallback. Defaults to the main
+# model, but you can point it at a smaller/faster one (e.g. 'llama3.2:1b') to
+# speed up the estimate step on CPU-only servers — set BOM_PRICE_EST_MODEL.
+EST_MODEL = os.environ.get('BOM_PRICE_EST_MODEL', MODEL)
+
 # Parts are looked up concurrently. More workers = faster, but more parallel
 # DuckDuckGo requests (which can increase rate-limiting). Tune via env var.
 MAX_WORKERS = max(1, int(os.environ.get('BOM_PRICE_WORKERS', '6')))
@@ -220,10 +225,11 @@ def _ddg_price(pn, mfr):
         f'{prefix}{pn} price buy distributor',
         f'"{pn}" price USD',
     ]
-    # Gather price candidates across BOTH queries, then vote — more samples
-    # means we can spot the consistent cluster and drop wild outliers.
+    # Gather price candidates, then vote. Stop as soon as we have enough to form
+    # a reliable consensus (3 is the minimum for outlier rejection) — most parts
+    # finish on the first query, skipping the slower second one entirely.
     all_prices = []
-    for q in queries:
+    for i, q in enumerate(queries):
         try:
             with DDGS(timeout=12) as ddgs:
                 results = list(ddgs.text(q, max_results=6))
@@ -232,15 +238,17 @@ def _ddg_price(pn, mfr):
                     f"{r.get('title','')} {r.get('body','')}" for r in results
                 )
                 all_prices.extend(_parse_prices(combined))
-            if len(all_prices) >= 5:
-                break  # enough samples to form a reliable consensus
+            if len(all_prices) >= 3:
+                break  # enough samples — don't pay for the second query
         except Exception as e:
             name, msg = type(e).__name__, str(e)
             print(f'  [DDG] query failed: {name}: {msg[:120]}')
             # Back off harder when we are being rate limited
             if 'ratelimit' in name.lower() or 'rate' in msg.lower() or '202' in msg:
                 time.sleep(3.0)
-        time.sleep(0.6)
+        # brief pause only BETWEEN queries, never after the last one
+        if i < len(queries) - 1:
+            time.sleep(0.35)
 
     price = _consensus_price(all_prices)
     if price:
@@ -300,7 +308,7 @@ def _ollama_knowledge_price(pn, mfr, desc, qty=1):
         )
         client = ollama.Client(host=OLLAMA_HOST)
         resp = client.chat(
-            model=MODEL,
+            model=EST_MODEL,
             messages=[{'role': 'user', 'content': prompt}],
             format='json',
             options={'temperature': 0.1, 'num_ctx': 2048, 'num_predict': 256},
