@@ -413,6 +413,64 @@ _MFR_HINTS = {
     'MERSEN', 'LITTELFUSE', 'SQUARE D', 'HONEYWELL', 'THOMAS AND BETTS', 'CLARION',
 }
 
+# Markers that commonly precede a manufacturer part number inside a description
+# cell, e.g. "Cat. No. 5SJ4111-8HG41", "Part No: 1034250", "P/N 6ES7155-6AU00".
+_DESC_MPN_RE = re.compile(
+    r'(?:cat(?:alog)?\.?\s*(?:no|number|#)?\.?|'
+    r'(?:part|order|model|article)\s*(?:no|number|#)?\.?|'
+    r'p\s*/?\s*n)'
+    r'\s*[:.\-]?\s*'
+    r'([A-Za-z0-9][A-Za-z0-9\-\./]{3,})',
+    re.IGNORECASE,
+)
+
+# Explicit "Vendor: X" / "Mfr: X" / "Manufacturer: X" labels inside descriptions.
+_DESC_MFR_RE = re.compile(
+    r'(?:vendor|manufacturer|mfr|mfg|brand|make)\s*[:.\-]?\s*'
+    r'([A-Za-z][A-Za-z&\.\- ]{2,30})',
+    re.IGNORECASE,
+)
+
+
+def _extract_mpn_from_text(text):
+    """Pull a manufacturer part number out of a free-text description cell.
+    Handles 'Cat. No. X', 'Cat No: X', 'Part No. X', 'P/N X', 'Order No X', etc.
+    Returns '' if nothing part-number-like is found."""
+    if not text:
+        return ''
+    m = _DESC_MPN_RE.search(str(text))
+    if m:
+        cand = m.group(1).strip(' .,;:')
+        # A real part number has a digit and is 4+ chars (skips words like 'EACH')
+        if len(cand) >= 4 and re.search(r'\d', cand):
+            return cand
+    return ''
+
+
+def _extract_mfr_from_text(text):
+    """Pull a manufacturer name from a description cell — a known manufacturer
+    name if present, otherwise an explicit 'Vendor: X' label."""
+    if not text:
+        return ''
+    s = str(text)
+    # Known manufacturers first — clean and unambiguous.
+    upper = s.upper()
+    for hint in _MFR_HINTS:
+        if hint in upper:
+            return hint.title()
+    # Fallback: explicit label, trimmed at any part-number marker so we don't
+    # capture "ACME Cat No: 123" as the manufacturer name.
+    m = _DESC_MFR_RE.search(s)
+    if m:
+        name = re.split(
+            r'\b(?:cat|catalog|part|order|model|article|no|number|p/?n|item|u/m)\b',
+            m.group(1), maxsplit=1, flags=re.IGNORECASE,
+        )[0]
+        name = name.strip(' .,;:-')
+        if name and name.upper() not in ('EA', 'N/A', 'NA'):
+            return name.title()
+    return ''
+
 
 def _generic_col_features(series):
     """Compute content fingerprint for one column. Returns None if all-empty."""
@@ -609,6 +667,24 @@ def clean_generic_columns(df):
             print(f"🔧 GENERIC DEBUG: Mapped '{old}' -> '{new}' (role inference)")
     else:
         print("🔧 GENERIC DEBUG: No columns confidently classified by role inference")
+
+    # Some BOMs bury the manufacturer part number (and the manufacturer) inside
+    # the description text instead of giving them their own columns — e.g.
+    # "...SIEMENS Cat. No. 5SJ4111-8HG41". Mine them out so the price lookup has
+    # a real part number to search and the cost sheet gets a proper MFR column.
+    if 'Description' in df.columns:
+        if 'Part Number' not in df.columns:
+            mpns = df['Description'].apply(_extract_mpn_from_text)
+            hits = (mpns != '').sum()
+            if hits:
+                df['Part Number'] = mpns
+                print(f"🔧 GENERIC DEBUG: Extracted Part Number from description for {hits} row(s)")
+        if 'Manufacturer' not in df.columns:
+            mfrs = df['Description'].apply(_extract_mfr_from_text)
+            hits = (mfrs != '').sum()
+            if hits:
+                df['Manufacturer'] = mfrs
+                print(f"🔧 GENERIC DEBUG: Extracted Manufacturer from description for {hits} row(s)")
 
     print(f"🔧 GENERIC DEBUG: Final table shape: {df.shape}")
     print(f"🔧 GENERIC DEBUG: Final columns: {df.columns.tolist()}")
