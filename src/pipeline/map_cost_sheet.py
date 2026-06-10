@@ -509,6 +509,32 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH,
     else:
         print("⚠️ Unit Price in USD not found in price file — COST EACH will be blank")
 
+    # ── Drop fully-empty rows ───────────────────────────────────────────────────
+    # Some extractions leave rows that are blank / "N/A" across every field
+    # (spacer rows, wrapped-text fragments). Remove them so the cost sheet has no
+    # empty lines, and re-index so the rows below shift up to fill the gap.
+    content_cols = [c for c in df_out.columns if c != "ITEM"]
+
+    def _row_is_empty(row):
+        for c in content_cols:
+            v = row[c]
+            if c == "COST EACH":
+                # a real, non-zero price counts as content
+                if pd.notna(v) and float(v) != 0:
+                    return False
+            else:
+                s = str(v).strip().upper()
+                if s not in ("", "N/A", "NAN", "NONE"):
+                    return False
+        return True
+
+    if content_cols:
+        before_rows = len(df_out)
+        df_out = df_out[~df_out.apply(_row_is_empty, axis=1)].reset_index(drop=True)
+        dropped = before_rows - len(df_out)
+        if dropped:
+            print(f"🧹 Dropped {dropped} fully-empty row(s) — cost sheet re-packed with no gaps")
+
     # Add ITEM numbers (sequential numbering)
     if "ITEM" not in df_out.columns:
         df_out["ITEM"] = range(1, len(df_out) + 1)

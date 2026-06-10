@@ -673,12 +673,29 @@ def clean_generic_columns(df):
     # "...SIEMENS Cat. No. 5SJ4111-8HG41". Mine them out so the price lookup has
     # a real part number to search and the cost sheet gets a proper MFR column.
     if 'Description' in df.columns:
-        if 'Part Number' not in df.columns:
-            mpns = df['Description'].apply(_extract_mpn_from_text)
-            hits = (mpns != '').sum()
-            if hits:
+        mpns = df['Description'].apply(_extract_mpn_from_text)
+        hits = (mpns != '').sum()
+        if hits:
+            if 'Part Number' not in df.columns:
+                # No part-number column at all — use the extracted commercial P/N.
                 df['Part Number'] = mpns
                 print(f"🔧 GENERIC DEBUG: Extracted Part Number from description for {hits} row(s)")
+            else:
+                # There IS a part-number column AND the description carries a
+                # (commercial) part number. If they differ, the column is the
+                # customer's internal number → move it to CUST PART # and use the
+                # extracted manufacturer P/N as the COMMERCIAL part number.
+                existing = df['Part Number'].astype(str).str.strip()
+                mpn_str  = mpns.astype(str).str.strip()
+                differs  = ((mpn_str != '') & (mpn_str != existing)).sum()
+                if differs >= max(1, int(0.5 * hits)):
+                    if 'Internal Part Number' not in df.columns:
+                        df['Internal Part Number'] = df['Part Number']   # → CUST PART #
+                    # Commercial P/N from the description; blank where none found.
+                    df['Part Number'] = mpn_str.values
+                    print(f"🔧 GENERIC DEBUG: Column P/N looks like a customer number — "
+                          f"moved it to CUST PART # and used the description's commercial "
+                          f"P/N as COMMERCIAL PART # ({hits} row(s))")
         if 'Manufacturer' not in df.columns:
             mfrs = df['Description'].apply(_extract_mfr_from_text)
             hits = (mfrs != '').sum()
