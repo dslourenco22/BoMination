@@ -23,6 +23,11 @@ MODEL      = os.environ.get('BOM_LLM_MODEL',      'llama3.2')
 OLLAMA_HOST = os.environ.get('BOM_LLM_ENDPOINT', 'http://127.0.0.1:11434')
 SEARCH_DELAY = 0.5   # seconds between parts (reduced — Ollama is local)
 
+# Sane upper bound for a single BOM part price. Anything above this in a search
+# snippet is almost certainly a parse artifact (UPC, phone number, SKU, part
+# number with a decimal) — not a price. Raise via env if you stock $50k+ items.
+PRICE_CAP = float(os.environ.get('BOM_MAX_PRICE', '50000'))
+
 # Parts are looked up concurrently. More workers = faster, but more parallel
 # DuckDuckGo requests (which can increase rate-limiting). Tune via env var.
 MAX_WORKERS = max(1, int(os.environ.get('BOM_PRICE_WORKERS', '6')))
@@ -130,11 +135,28 @@ def _parse_prices(text):
             if g:
                 try:
                     v = float(g.replace(',', ''))
-                    if 0 < v < 1_000_000:
+                    # Reject absurd values up front — these are parse artifacts
+                    # (UPCs, phone numbers, SKUs), not real part prices.
+                    if 0 < v <= PRICE_CAP:
                         found.append(v)
                 except ValueError:
                     pass
     return sorted(found)
+
+
+def _extract_number(value):
+    """Pull the first numeric value out of arbitrary text. (LD)
+    Handles '1,500.00', '$1,500', '~$45', '1500 USD', '45.00-50.00' → first number.
+    Returns a float, or None if there's no number."""
+    if value is None:
+        return None
+    m = re.search(r'[\d,]+(?:\.\d+)?', str(value))
+    if not m:
+        return None
+    try:
+        return float(m.group().replace(',', ''))
+    except ValueError:
+        return None
 
 
 def _median(vals):
@@ -284,11 +306,13 @@ def _ollama_knowledge_price(pn, mfr, desc, qty=1):
             options={'temperature': 0.1, 'num_ctx': 2048, 'num_predict': 256},
         )
         data = json.loads(resp['message']['content'])
-        price_str = str(data.get('unit_price', '0')).strip()
-        price = float(price_str)
+        # Pull the number out of whatever the model returns — handles "1,500.00",
+        # "$1,500", "~$45", "1500 USD", "45.00-50.00", etc. — instead of trying to
+        # float() the raw string (which broke on commas and stray characters).
+        price = _extract_number(data.get('unit_price', ''))
         distributor = str(data.get('distributor', 'estimate'))
         notes = str(data.get('notes', 'training data estimate'))
-        if price > 0:
+        if price and price > 0:
             return price, distributor, notes
     except Exception as e:
         print(f'  [OLLAMA-EST] Failed: {e}')
