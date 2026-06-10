@@ -3,6 +3,10 @@ from tkinter import filedialog, messagebox, ttk
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from ttkbootstrap.dialogs import Messagebox
+try:
+    from ttkbootstrap.scrolled import ScrolledFrame
+except Exception:
+    ScrolledFrame = None
 import subprocess
 import os
 import threading
@@ -413,9 +417,15 @@ class BoMApp:
     
     def build_main_tab(self, main_container):
         """Build the main tab interface."""
-        # Add padding to main container
-        main_container_padded = ttk.Frame(main_container)
-        main_container_padded.pack(fill=BOTH, expand=True, padx=20, pady=20)
+        # Use a scrollable container so every step AND the Run button stay
+        # reachable even when the window is short (otherwise the added Pricing/
+        # Output panels push the Run button off the bottom with no way to scroll).
+        if ScrolledFrame is not None:
+            main_container_padded = ScrolledFrame(main_container, autohide=True, padding=20)
+            main_container_padded.pack(fill=BOTH, expand=True)
+        else:
+            main_container_padded = ttk.Frame(main_container)
+            main_container_padded.pack(fill=BOTH, expand=True, padx=20, pady=20)
         
         # Title with modern styling
         title_label = ttk.Label(
