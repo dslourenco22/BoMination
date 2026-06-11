@@ -404,8 +404,9 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH,
                 print(f"✅ Added ITEM from merged file column '{col}' (Farrell format)")
                 break
 
-        cust_pn_candidates = ['Internal Part Number', 'CUST PART', 'CUSTOMER PART', 'INTERNAL P/N',
-                               'INTERNAL PART', 'CUSTOMER P/N', 'CUST P/N', 'CUST PN']
+        cust_pn_candidates = ['Customer Part Number', 'Internal Part Number', 'CUST PART',
+                               'CUSTOMER PART', 'INTERNAL P/N', 'INTERNAL PART', 'CUSTOMER P/N',
+                               'CUST P/N', 'CUST PN', 'Proton P/N', '901D P/N']
         for col in cust_pn_candidates:
             if col in df_merged.columns:
                 df_oem["CUST PART #"] = df_merged[col]

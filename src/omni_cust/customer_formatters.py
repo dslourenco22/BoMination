@@ -496,6 +496,25 @@ def _extract_mpn_from_text(text):
     return ''
 
 
+def _extract_pn_from_mfr(text):
+    """Find a part number tucked into a MANUFACTURER cell, e.g.
+    'SIEMENS 5SJ4111-8HG41' or 'ALLEN BRADLEY / 700S-EFG20E3C'.
+
+    The manufacturer cell is a controlled context (no prose), so we accept any
+    token that has both letters and digits and is either hyphenated/slashed or
+    6+ chars — that's the part number, not the maker's name. Returns '' if none.
+    """
+    if not text:
+        return ''
+    for raw in re.split(r'[\s,;/]+', str(text).strip()):
+        t = raw.strip('.,;:()')
+        if (4 <= len(t) <= 30 and re.search(r'\d', t) and re.search(r'[A-Za-z]', t)
+                and _TOKEN_RE.fullmatch(t)
+                and ('-' in t or '/' in t or len(t) >= 6)):
+            return t
+    return ''
+
+
 def _extract_mfr_from_text(text):
     """Pull a manufacturer name from a description cell — a known manufacturer
     name if present, otherwise an explicit 'Vendor: X' label."""
@@ -544,6 +563,12 @@ def _generic_col_features(series):
             return False
         return bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9\-\./#]+', v))
 
+    def _is_alnum_pn(v):
+        # Commercial part numbers mix LETTERS and DIGITS (5SJ4111-8HG41);
+        # customer/internal numbers are often plain digits (51827).
+        return (' ' not in v and 4 <= len(v) <= 30
+                and bool(re.search(r'[A-Za-z]', v)) and bool(re.search(r'\d', v)))
+
     def _is_unit(v):
         return v.upper().replace('.', '') in _UNIT_TOKENS
 
@@ -560,6 +585,7 @@ def _generic_col_features(series):
     return {
         'frac_smallint': _frac(_is_smallint),
         'frac_partnum':  _frac(_is_partnum),
+        'frac_alnum':    _frac(_is_alnum_pn),
         'frac_unit':     _frac(_is_unit),
         'frac_mfr':      _frac(_has_mfr),
         'avg_words':     vals.str.split().apply(len).mean(),
@@ -569,25 +595,44 @@ def _generic_col_features(series):
     }
 
 
+# Headers that unambiguously denote the COMMERCIAL (manufacturer) part number —
+# used to break ties when a BOM has both a commercial and a customer part column.
+_STRONG_COMMERCIAL = ['PART NUMBER', 'PART NO', 'PART#', 'PART #', r'\bMPN\b',
+                      'MFG PART', 'MFR PART', 'MANUFACTURER PART', 'CATALOG',
+                      r'\bCAT\.? ?NO', 'ORDER CODE', 'ORDER NO', 'ARTICLE',
+                      'STOCK NO', r'\bSKU\b']
+
+
+def _is_strong_commercial_header(col):
+    c = re.sub(r'\s+', ' ', str(col).upper().strip())
+    return any(re.search(p, c) for p in _STRONG_COMMERCIAL)
+
+
 def _generic_header_role(col):
     """Best-guess role from the header name alone, or None. Specific → generic."""
     c = re.sub(r'\s+', ' ', str(col).upper().strip())
     rules = [
-        ('Unit',         [r'\bU/?M\b', r'\bUOM\b', 'UNIT OF MEAS']),
-        ('Quantity',     [r'\bQTY\b', 'QUANT', r"\bQ'?TY\b", r'\bQNTY\b']),
-        ('Part Number',  ['PART NUMBER', 'PART NO', 'PART#', 'PART #', r'\bMPN\b',
+        ('Unit',          [r'\bU/?M\b', r'\bUOM\b', 'UNIT OF MEAS']),
+        ('Quantity',      [r'\bQTY\b', 'QUANT', r"\bQ'?TY\b", r'\bQNTY\b']),
+        # Customer / internal part number — checked BEFORE the commercial part
+        # number so "CUST P/N" / "INTERNAL P/N" don't get taken as commercial.
+        ('Customer Part Number',
+                          [r'\bCUST\b', 'CUSTOMER', 'INTERNAL P/N', 'INTERNAL PART',
+                           r'\bOEM\b', 'OUR P/N', 'OUR PART']),
+        ('Part Number',   ['PART NUMBER', 'PART NO', 'PART#', 'PART #', r'\bMPN\b',
                           'MFG PART', 'MFR PART', 'MANUFACTURER PART', 'CATALOG',
                           r'\bCAT\.? ?NO', r'\bMODEL\b', 'ORDER CODE', 'ORDER NO',
                           'ARTICLE', 'ITEM NUMBER', r'\bP/N\b', 'STOCK NO', r'\bSKU\b']),
-        ('Description',  ['DESCRIPTION', r'\bDESC\b', 'ITEM NAME', 'NOMENCLATURE',
+        ('Description',   ['DESCRIPTION', r'\bDESC\b', 'ITEM NAME', 'NOMENCLATURE',
                           'PART NAME', 'ITEM DESC']),
-        ('Manufacturer', ['MANUFACTURER', r'\bMFR\b', r'\bMFG\b', r'\bMAKE\b',
+        ('Manufacturer',  ['MANUFACTURER', r'\bMFR\b', r'\bMFG\b', r'\bMAKE\b',
                           'BRAND', 'VENDOR', 'SUPPLIER']),
-        ('Notes',        ['NOTES', r'\bNOTE\b', 'REMARK', 'COMMENT']),
-        ('Reference',    ['REFERENCE', 'REF DES', r'\bREF\b', 'DESIGNAT', r'\bTAG\b',
+        ('Notes',         ['NOTES', r'\bNOTE\b', 'REMARK', 'COMMENT']),
+        ('Reference',     ['REFERENCE', 'REF DES', r'\bREF\b', 'DESIGNAT',
                           'LOCATION', r'\bLOC\b']),
-        ('Item',         [r'\bITEM\b', r'\bLINE\b', r'\bFIND\b', r'\bPOS\b',
-                          r'\bSEQ\b', r'\bBALLOON\b']),
+        ('Item',          [r'\bITEM\b', r'\bLINE\b', r'\bFIND\b', 'FIND NO',
+                          'DEVICE TAG', r'\bPOS\b', r'\bSEQ\b', r'\bBALLOON\b',
+                          r'\bTAG\b']),
     ]
     for role, pats in rules:
         if any(re.search(p, c) for p in pats):
@@ -622,8 +667,18 @@ def _infer_generic_roles(df):
         elif role == 'Item':
             if f['sequential']:
                 s += 3.0
+        elif role == 'Customer Part Number':
+            # Header-driven in this pass (CUST / INTERNAL / OEM headers); a second
+            # part-number-like column is picked up by the content pass below.
+            s += 0.5 * f['frac_partnum']
         elif role == 'Part Number':
-            s += 3.0 * f['frac_partnum'] + f['uniq']
+            # Prefer the COMMERCIAL-looking column: letters+digits (frac_alnum) and
+            # a canonical manufacturer header break ties against a customer column.
+            s += 3.0 * f['frac_partnum'] + f['uniq'] + 1.5 * f['frac_alnum']
+            if _is_strong_commercial_header(col):
+                s += 1.5
+            if headers[col] == 'Customer Part Number':
+                s -= 5.0                                    # never let a customer col become commercial
             if f['avg_words'] > 3:                          # prose ≠ part number
                 s -= 2.0
         elif role == 'Description':
@@ -638,12 +693,14 @@ def _infer_generic_roles(df):
 
     # Minimum score required to claim each role (avoids spurious mappings).
     thresholds = {
-        'Unit': 2.0, 'Quantity': 1.5, 'Item': 2.0, 'Part Number': 1.2,
-        'Description': 1.5, 'Manufacturer': 1.5, 'Notes': 2.0, 'Reference': 2.0,
+        'Unit': 2.0, 'Quantity': 1.5, 'Customer Part Number': 2.0, 'Item': 2.0,
+        'Part Number': 1.2, 'Description': 1.5, 'Manufacturer': 1.5,
+        'Notes': 2.0, 'Reference': 2.0,
     }
-    # Assign the most specific/critical roles first.
-    order = ['Unit', 'Quantity', 'Item', 'Part Number', 'Description',
-             'Manufacturer', 'Notes', 'Reference']
+    # Assign the most specific/critical roles first. Customer P/N (header-driven)
+    # before Part Number so an explicit "CUST P/N" isn't taken as commercial.
+    order = ['Unit', 'Quantity', 'Customer Part Number', 'Item', 'Part Number',
+             'Description', 'Manufacturer', 'Notes', 'Reference']
 
     rename, taken = {}, set()
     for role in order:
@@ -657,6 +714,19 @@ def _infer_generic_roles(df):
         if best is not None:
             rename[best] = role
             taken.add(best)
+
+    # Content pass: when a BOM has TWO part-number columns, the commercial one
+    # already took 'Part Number'; a remaining strongly-part-like column is the
+    # customer/internal number. Only if a customer column wasn't found by header.
+    if 'Customer Part Number' not in rename.values() and 'Part Number' in rename.values():
+        for col in feats:
+            if col in taken:
+                continue
+            f = feats[col]
+            if f['frac_partnum'] >= 0.6 and f['avg_words'] <= 1.5:
+                rename[col] = 'Customer Part Number'
+                taken.add(col)
+                break
     return rename
 
 
@@ -751,6 +821,28 @@ def clean_generic_columns(df):
             if hits:
                 df['Manufacturer'] = mfrs
                 print(f"🔧 GENERIC DEBUG: Extracted Manufacturer from description for {hits} row(s)")
+
+    # Last resort for the commercial part number: it's sometimes tucked into the
+    # manufacturer cell (e.g. "SIEMENS 5SJ4111-8HG41"). Where COMMERCIAL is still
+    # blank, pull the part number out of Manufacturer and tidy the maker name.
+    if 'Manufacturer' in df.columns:
+        if 'Part Number' not in df.columns:
+            df['Part Number'] = ''
+        blanks = {'', 'N/A', 'NAN', 'NONE'}
+        filled = 0
+        for idx in df.index:
+            if str(df.at[idx, 'Part Number']).strip().upper() not in blanks:
+                continue                                   # already have a commercial P/N
+            mfr_val = str(df.at[idx, 'Manufacturer'])
+            pn = _extract_pn_from_mfr(mfr_val)
+            if pn:
+                df.at[idx, 'Part Number'] = pn
+                cleaned = mfr_val.replace(pn, '').strip(' /,-')
+                if cleaned:
+                    df.at[idx, 'Manufacturer'] = cleaned   # keep just the maker name
+                filled += 1
+        if filled:
+            print(f"🔧 GENERIC DEBUG: Pulled Part Number from Manufacturer cell for {filled} row(s)")
 
     print(f"🔧 GENERIC DEBUG: Final table shape: {df.shape}")
     print(f"🔧 GENERIC DEBUG: Final columns: {df.columns.tolist()}")
