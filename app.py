@@ -232,10 +232,13 @@ html, body, [class*="css"], .stMarkdown, button, input, textarea, select {
 hr { border-color: var(--border) !important; }
 [data-testid="stCaptionContainer"], .stCaption { color: var(--muted) !important; }
 
-/* Hide Streamlit's default chrome for a clean internal-app shell */
+/* Hide Streamlit's default chrome for a clean internal-app shell. Hide ONLY the
+   Deploy button + decoration — NOT the whole toolbar, because the sidebar
+   expand arrow lives inside the toolbar and we need it to reopen the sidebar. */
 #MainMenu, footer { visibility: hidden; }
-[data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"] { display: none !important; }
-[data-testid="stHeader"] { background: transparent !important; height: 0 !important; }
+[data-testid="stAppDeployButton"] { display: none !important; }
+[data-testid="stDecoration"], [data-testid="stStatusWidget"] { display: none !important; }
+[data-testid="stHeader"] { background: transparent !important; }
 </style>
 """, unsafe_allow_html=True)
 
