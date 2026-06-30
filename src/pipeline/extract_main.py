@@ -36,18 +36,20 @@ If no BOM table is present return ONLY:
 {{"found": false, "headers": [], "rows": []}}
 
 RULES:
-- Use the EXACT column headers from the document — do not rename them
+- HEADERS: Copy the column headers EXACTLY as they appear in this document's table. Read them off the actual header row. Do NOT invent headers, and do NOT reuse the placeholder names shown in the example below — those are only there to demonstrate formatting.
+- COLUMN COUNT: Output one value per column for EVERY column in the document's header row. If the table has 7 columns, every row must have 7 values. Never drop or merge columns.
 - TWO-COLUMN LAYOUT: If the page has two BOM tables side-by-side with the same columns, treat them as ONE continuous table. Extract all rows from the LEFT side first, then all rows from the RIGHT side. Use the headers from the left side only.
 - Extract ONLY rows that are part of the BOM table — ignore page headers, footers, legal text, disclaimers, notes, signature blocks, revision history, and any text that appears outside the table boundaries
 - Include EVERY valid BOM data row — do not skip or summarize
 - Preserve the exact row order as they appear in the document — do not reorder, sort, or group rows
 - BLANK CELLS: If a cell is blank or empty, use "" for that position. NEVER shift the remaining values left to fill the gap. Every row must have exactly the same number of values as the headers list, with "" in every blank position.
 - COMBINED FIELDS: If a column contains a combined value like "MANUFACTURER / PART_NUMBER", keep the full value intact as one string — do not split it across columns.
-- MULTI-LINE CELLS: If a description or other value wraps onto the next line (with no new ITEM number), that continuation belongs to the current row — append it to that cell's value. Do not create a new row for wrapped text.
+- MULTI-LINE CELLS: If a description or other value wraps onto the next line (with no new item identifier), that continuation belongs to the current row — append it to that cell's value. Do not create a new row for wrapped text.
 
-BLANK CELL EXAMPLE — if headers are ["ITEM","QTY","PART NUMBER","MFG / PART NUMBER","DESCRIPTION"] and a row has no PART NUMBER:
-  CORRECT:   ["4", "5", "", "ALLEN BRADLEY / 700S-EFG20E3C", "Safety IEC Control Relay"]
-  INCORRECT: ["4", "5", "ALLEN BRADLEY / 700S-EFG20E3C", "Safety IEC Control Relay", ""]
+FORMATTING EXAMPLE (placeholder names — DO NOT copy these headers; use the document's real ones):
+  If this document's headers were ["<col1>","<col2>","<col3>","<col4>"] and a row's third column is blank:
+  CORRECT:   ["val1", "val2", "", "val4"]      (a "" placeholder keeps every column aligned)
+  INCORRECT: ["val1", "val2", "val4"]          (dropping the blank shifts everything left)
 
 DOCUMENT TEXT:
 {text}
@@ -221,7 +223,9 @@ def call_local_ollama(prompt):
             model=MODEL,
             messages=[{'role': 'user', 'content': prompt}],
             format='json',
-            options={'temperature': 0, 'num_ctx': 8192, 'num_predict': 4096},
+            # Bigger context + output so dense pages aren't truncated mid-table
+            # (a too-small num_predict silently cuts the row list short).
+            options={'temperature': 0, 'num_ctx': 16384, 'num_predict': 8192},
         )
         return response['message']['content']
     except Exception as e:
@@ -345,23 +349,35 @@ def _extract_native_tables(pdf_page, label=''):
             return []
 
         results = []
+        bom_kw = ['ITEM', 'QTY', 'PART', 'MFG', 'MFR', 'DESCRIPTION', 'MANUFACTURER',
+                  'MPN', 'CATEGORY', 'PACKAGE', 'MODEL', 'CATALOG']
+
+        def _clean_hdr(cells):
+            # Collapse wrap-newlines so "INTERNAL\nPART #\n(IPN)" → "INTERNAL PART # (IPN)"
+            return [re.sub(r'\s+', ' ', str(c or '').replace('\n', ' ')).strip() for c in cells]
+
         for t in raw_tables:
             if not t or len(t) < 2:
                 continue
 
-            # First row is the header
-            headers = [str(h or '').strip() for h in t[0]]
-            if sum(1 for h in headers if h) < 2:
-                continue  # Not enough header columns — not a real table
-
-            # Check that the headers look like BOM columns
-            combined_headers = ' '.join(headers).upper()
-            bom_kw = ['ITEM', 'QTY', 'PART', 'MFG', 'DESCRIPTION']
-            if sum(1 for kw in bom_kw if kw in combined_headers) < 2:
+            # FIND the header row among the first few rows — the first page often
+            # has a title/metadata preamble that pdfplumber lumps into the table
+            # above the real header. (Assuming row 0 is the header dropped page 1.)
+            hdr_idx = None
+            for ri in range(min(6, len(t))):
+                cleaned = _clean_hdr(t[ri])
+                if sum(1 for h in cleaned if h) < 2:
+                    continue
+                if sum(1 for kw in bom_kw if kw in ' '.join(cleaned).upper()) >= 2:
+                    hdr_idx = ri
+                    break
+            if hdr_idx is None:
                 continue  # Doesn't look like a BOM table
 
+            headers = _clean_hdr(t[hdr_idx])
+
             rows = []
-            for row in t[1:]:
+            for row in t[hdr_idx + 1:]:
                 # Normalize each cell: join multi-line content, strip whitespace
                 clean = [' '.join(str(c or '').split()) for c in row]
                 if any(v for v in clean):  # skip all-blank rows
@@ -379,6 +395,105 @@ def _extract_native_tables(pdf_page, label=''):
     except Exception as e:
         print(f'[NATIVE] {label}: table detection failed ({e}), falling back to LLM')
         return []
+
+
+def _extract_text_aligned_table(page, label='', prev=None):
+    """Parse a GRIDLESS, text-aligned BOM table using word x-positions.
+
+    pdfplumber's line-based detection needs ruling lines; most real BOMs are just
+    columns of aligned text. This finds the header row by BOM keywords, derives
+    column boundaries from the header word x-positions, then bins each following
+    line's words into those columns. It naturally skips any title/metadata
+    preamble above the header — which is what makes a small LLM choke.
+
+    `prev` = (names, anchors) carried from a previous page, so continuation pages
+    that repeat data but not the header still parse. Returns (df, names, anchors)
+    or (None, None, None).
+    """
+    BOM_KW = ['PART', 'QTY', 'QUANTITY', 'DESCRIPTION', 'MANUFACTURER', 'MFR',
+              'MFG', 'ITEM', 'MPN', 'PACKAGE', 'CATEGORY', 'UOM', 'MODEL', 'VENDOR',
+              'SUPPLIER', 'REF']
+    try:
+        words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+    except Exception:
+        return None, None, None
+    if not words:
+        return None, None, None
+
+    # Group words into lines by vertical position (3px tolerance).
+    lines = {}
+    for w in words:
+        lines.setdefault(round(w['top'] / 3.0), []).append(w)
+    line_items = [sorted(ws, key=lambda w: w['x0']) for _, ws in sorted(lines.items())]
+
+    # Locate the header line (the one with the most BOM keywords).
+    names, anchors, start = None, None, 0
+    best_i, best_score = None, 1
+    for i, ln in enumerate(line_items):
+        t = ' '.join(w['text'] for w in ln).upper()
+        score = sum(1 for kw in BOM_KW if kw in t)
+        if score > best_score:
+            best_score, best_i = score, i
+
+    if best_i is not None:
+        hw = line_items[best_i]
+        anchors, names = [hw[0]['x0']], [hw[0]['text']]
+        for prev_w, cur in zip(hw, hw[1:]):
+            if cur['x0'] - prev_w['x1'] > 12:          # big gap = new column
+                anchors.append(cur['x0'])
+                names.append(cur['text'])
+            else:
+                names[-1] += ' ' + cur['text']         # same column (multi-word header)
+        start = best_i + 1
+    elif prev:
+        names, anchors = prev                          # continuation page — reuse columns
+        start = 0
+    else:
+        return None, None, None
+
+    if len(anchors) < 3:
+        return None, None, None                        # not a real multi-column table
+
+    # The leftmost column's header is often on a line ABOVE the main keyword line
+    # (wrapped headers like "INTERNAL PART #\n(IPN)"), so the main line's anchors
+    # start at column 2. If the DATA rows consistently have content to the LEFT of
+    # the first anchor, recover that missed leading column (the classifier will
+    # name it by content). Likewise catch one missed column on the right.
+    data_lines = line_items[start:start + 12]
+    left_xs = [w['x0'] for ln in data_lines for w in ln if w['x0'] < anchors[0] - 12]
+    if len(left_xs) >= 3:
+        anchors.insert(0, min(left_xs))
+        names.insert(0, 'Column_L')
+
+    bounds = anchors + [float('inf')]
+
+    def _col_of(x):
+        if x < anchors[0] - 6:
+            return 0                                    # left of everything → first column
+        for i in range(len(anchors)):
+            if anchors[i] - 6 <= x < bounds[i + 1] - 6:
+                return i
+        return len(anchors) - 1
+
+    rows = []
+    for ln in line_items[start:]:
+        cells = [''] * len(anchors)
+        for w in ln:
+            cells[_col_of(w['x0'])] = (cells[_col_of(w['x0'])] + ' ' + w['text']).strip()
+        if not any(cells):
+            continue
+        joined = ' '.join(cells).upper()
+        # drop page footers like "Page 1 of 8" / "Confidential ..."
+        if (('PAGE ' in joined and ' OF ' in joined) or 'CONFIDENTIAL' in joined) \
+                and sum(1 for c in cells if c) <= 2:
+            continue
+        rows.append(cells)
+
+    if len(rows) < 2:
+        return None, None, None
+    df = pd.DataFrame(rows, columns=names).fillna('').astype(str)
+    print(f'[ALIGNED] {label}: {len(df)} rows × {len(names)} cols via text-position parsing')
+    return df, names, anchors
 
 
 def _split_into_chunks(text, chunk_size=10000, overlap=500):
@@ -438,6 +553,7 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
                 page_indexes = list(range(len(pdf.pages)))
 
             all_raw_tables = []
+            last_table_meta = None   # (names, anchors) for headerless continuation pages
             for idx in page_indexes:
                 page = pdf.pages[idx]
 
@@ -449,6 +565,16 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
                 if native:
                     all_raw_tables.extend(native)
                     continue  # both columns captured — skip split + LLM
+
+                # ── Secondary: text-position parsing for GRIDLESS tables ──
+                # Reliable for borderless BOMs (and skips metadata preamble),
+                # where a small LLM tends to hallucinate or collapse columns.
+                aligned_df, a_names, a_anchors = _extract_text_aligned_table(
+                    page, f'Page {idx + 1}', prev=last_table_meta)
+                if aligned_df is not None and len(aligned_df) >= 2:
+                    last_table_meta = (a_names, a_anchors)
+                    all_raw_tables.append(aligned_df)
+                    continue  # parsed positionally — skip LLM
 
                 # ── Fallback: split + LLM ─────────────────────────────────
                 sub_pages = _split_two_column_page(page)

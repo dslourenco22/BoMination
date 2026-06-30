@@ -476,6 +476,19 @@ if st.button("Run Pipeline", type="primary", use_container_width=True, disabled=
                         )
                         saved_path = Path(saved)
                         if saved_path.exists():
+                            # ── Quality check: flag rows that may need review ──
+                            def _qcol(df, opts):
+                                return next((c for c in opts if c in df.columns), None)
+                            def _blank(v):
+                                return str(v).strip().upper() in ("", "N/A", "NAN", "NONE")
+                            n_rows = len(df_merged)
+                            pn_c  = _qcol(df_merged, ["Part Number", "MPN", "PART NUMBER"])
+                            qty_c = _qcol(df_merged, ["Quantity", "QTY", "QUANTITY"])
+                            miss_pn  = sum(_blank(v) for v in df_merged[pn_c])  if pn_c  else n_rows
+                            miss_qty = sum(_blank(v) for v in df_merged[qty_c]) if qty_c else n_rows
+                            est = int((df_priced["Distributor"] == "estimate").sum()) \
+                                  if enable_prices and "Distributor" in df_priced.columns else 0
+
                             # de-dupe download keys if two PDFs share a stem
                             key = saved_path.name
                             if key in results:
@@ -484,6 +497,10 @@ if st.button("Run Pipeline", type="primary", use_container_width=True, disabled=
                                 "name":  saved_path.name,
                                 "bytes": saved_path.read_bytes(),
                                 "source": up.name,
+                                "rows": n_rows,
+                                "miss_pn": int(miss_pn),
+                                "miss_qty": int(miss_qty),
+                                "estimates": est,
                             }
                             st.write(f"✓ Cost sheet ready: {saved_path.name}")
                         else:
@@ -549,7 +566,25 @@ if st.session_state.run_results:
     for key, info in results.items():
         with st.container(border=True):
             st.markdown(f"**{info['name']}**")
-            st.caption(f"from {info['source']}")
+            st.caption(f"from {info['source']} · {info.get('rows', 0)} parts")
+
+            # ── Confidence / review banner ─────────────────────────────────────
+            miss_pn  = info.get("miss_pn", 0)
+            miss_qty = info.get("miss_qty", 0)
+            est      = info.get("estimates", 0)
+            flags = []
+            if miss_pn:
+                flags.append(f"{miss_pn} missing a part number")
+            if miss_qty:
+                flags.append(f"{miss_qty} missing a quantity")
+            if flags:
+                st.warning("⚠ Review recommended — " + "; ".join(flags)
+                           + ". Open the sheet and check these rows.", icon="⚠️")
+            else:
+                st.success("✓ Every row has a part number and quantity.", icon="✅")
+            if est:
+                st.caption(f"💡 {est} price(s) are AI estimates (no web match) — verify before quoting.")
+
             st.download_button(
                 label="Download",
                 data=info["bytes"],

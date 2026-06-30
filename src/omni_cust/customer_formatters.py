@@ -496,6 +496,18 @@ def _extract_mpn_from_text(text):
     return ''
 
 
+def _looks_commercial(series):
+    """True if a column already holds real commercial part numbers — values that
+    mix LETTERS and DIGITS (BCM2711, MT53E1G32D2FW-046). Internal numbers that are
+    plain digits/hyphens (100-00241-01, 51827) return False."""
+    vals = series.dropna().astype(str).str.strip()
+    vals = vals[(vals != '') & (~vals.str.lower().isin(['nan', 'n/a', 'none', '-']))]
+    if len(vals) == 0:
+        return False
+    alnum = sum(bool(re.search(r'[A-Za-z]', v) and re.search(r'\d', v)) for v in vals)
+    return alnum / len(vals) >= 0.5
+
+
 def _extract_pn_from_mfr(text):
     """Find a part number tucked into a MANUFACTURER cell, e.g.
     'SIEMENS 5SJ4111-8HG41' or 'ALLEN BRADLEY / 700S-EFG20E3C'.
@@ -636,6 +648,23 @@ def _generic_header_role(col):
     ]
     for role, pats in rules:
         if any(re.search(p, c) for p in pats):
+            return role
+
+    # Fallback for headers that wrapped MID-WORD in the PDF (e.g. "MANUFACTURE R"
+    # → "MANUFACTURER", "QT Y" → "QTY"): compare with all whitespace removed.
+    tight = re.sub(r'\s+', '', c)
+    tight_rules = [
+        ('Unit',                 ['UOM']),
+        ('Quantity',             ['QUANTITY', 'QTY']),
+        ('Customer Part Number', ['CUSTOMERPART', 'CUSTPART', 'INTERNALPART', 'CUSTP/N']),
+        ('Part Number',          ['PARTNUMBER', 'PARTNO', 'MPN', 'MFGPART', 'MFRPART',
+                                  'CATALOG', 'ITEMNUMBER']),
+        ('Description',          ['DESCRIPTION', 'ITEMNAME']),
+        ('Manufacturer',         ['MANUFACTURER', 'VENDOR', 'SUPPLIER']),
+        ('Item',                 ['FINDNO', 'DEVICETAG']),
+    ]
+    for role, kws in tight_rules:
+        if any(kw in tight for kw in kws):
             return role
     return None
 
@@ -791,7 +820,13 @@ def clean_generic_columns(df):
     # the description text instead of giving them their own columns — e.g.
     # "...SIEMENS Cat. No. 5SJ4111-8HG41". Mine them out so the price lookup has
     # a real part number to search and the cost sheet gets a proper MFR column.
-    if 'Description' in df.columns:
+    # Only mine the description for a part number when we DON'T already have a
+    # real commercial part-number column. Otherwise a product name in the
+    # description (e.g. "Cortex-A72") would wrongly overwrite a true MPN column
+    # like "BCM2711". The Gillette case (column holds INTERNAL numbers, MPN only
+    # in the description) still works because that column is not commercial.
+    have_commercial = ('Part Number' in df.columns and _looks_commercial(df['Part Number']))
+    if 'Description' in df.columns and not have_commercial:
         mpns = df['Description'].apply(_extract_mpn_from_text)
         hits = (mpns != '').sum()
         if hits:
@@ -800,14 +835,14 @@ def clean_generic_columns(df):
                 df['Part Number'] = mpns
                 print(f"🔧 GENERIC DEBUG: Extracted Part Number from description for {hits} row(s)")
             else:
-                # There IS a part-number column AND the description carries a
-                # (commercial) part number. If they differ, the column is the
-                # customer's internal number → move it to CUST PART # and use the
-                # extracted manufacturer P/N as the COMMERCIAL part number.
+                # There IS a (non-commercial) part-number column AND the description
+                # carries a part number. If a MEANINGFUL fraction of rows differ, the
+                # column is the customer's internal number → move it to CUST PART #
+                # and use the extracted manufacturer P/N as COMMERCIAL.
                 existing = df['Part Number'].astype(str).str.strip()
                 mpn_str  = mpns.astype(str).str.strip()
                 differs  = ((mpn_str != '') & (mpn_str != existing)).sum()
-                if differs >= max(1, int(0.5 * hits)):
+                if differs >= max(2, int(0.3 * len(df))):
                     if 'Internal Part Number' not in df.columns:
                         df['Internal Part Number'] = df['Part Number']   # → CUST PART #
                     # Commercial P/N from the description; blank where none found.
@@ -815,12 +850,14 @@ def clean_generic_columns(df):
                     print(f"🔧 GENERIC DEBUG: Column P/N looks like a customer number — "
                           f"moved it to CUST PART # and used the description's commercial "
                           f"P/N as COMMERCIAL PART # ({hits} row(s))")
-        if 'Manufacturer' not in df.columns:
-            mfrs = df['Description'].apply(_extract_mfr_from_text)
-            hits = (mfrs != '').sum()
-            if hits:
-                df['Manufacturer'] = mfrs
-                print(f"🔧 GENERIC DEBUG: Extracted Manufacturer from description for {hits} row(s)")
+
+    # Manufacturer from the description (independent of the part-number logic).
+    if 'Description' in df.columns and 'Manufacturer' not in df.columns:
+        mfrs = df['Description'].apply(_extract_mfr_from_text)
+        hits = (mfrs != '').sum()
+        if hits:
+            df['Manufacturer'] = mfrs
+            print(f"🔧 GENERIC DEBUG: Extracted Manufacturer from description for {hits} row(s)")
 
     # Last resort for the commercial part number: it's sometimes tucked into the
     # manufacturer cell (e.g. "SIEMENS 5SJ4111-8HG41"). Where COMMERCIAL is still

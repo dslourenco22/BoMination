@@ -580,10 +580,24 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH,
     print("Mapped headers from cost sheet:", excel_headers)
 
     # Clear all data rows in the template before writing so stale content
-    # from previous runs doesn't bleed through below our new data
-    for clear_row in range(header_row + 1, header_row + 300):
+    # from previous runs doesn't bleed through below our new data. Clear well
+    # past the end of THIS run's data so nothing is ever left behind.
+    _clear_to = header_row + 1 + max(300, len(df_out) + 100)
+    for clear_row in range(header_row + 1, _clear_to):
         for col_idx in excel_headers.values():
             ws.cell(row=clear_row, column=col_idx).value = None
+
+    # Cell styling so text never spills/overlaps: wrap long values inside the
+    # cell and top-align. Borders/fills from the template are preserved.
+    from openpyxl.styles import Alignment
+    _wrap = Alignment(wrap_text=True, vertical='top', horizontal='left')
+
+    def _clean_cell(v):
+        # Strip stray newlines and collapse runs of whitespace so values are
+        # tidy and single-line; leave numbers (prices, qty) untouched.
+        if isinstance(v, str):
+            return re.sub(r'\s+', ' ', v.replace('\n', ' ').replace('\r', ' ')).strip()
+        return v
 
     # Insert data row by row
     for i, row in df_out.iterrows():
@@ -591,17 +605,16 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH,
             col_upper = col_name.upper().strip()
             if col_upper in excel_headers:
                 col_idx = excel_headers[col_upper]
-                # Handle different data types appropriately
+                cell = ws.cell(row=header_row + 1 + i, column=col_idx)
                 if pd.notna(value) and str(value).strip() != '':
-                    ws.cell(row=header_row + 1 + i, column=col_idx, value=value)
-                    print(f"📝 Inserted '{value}' into {col_upper} at row {header_row + 1 + i}, col {col_idx}")
+                    cell.value = _clean_cell(value)
                 else:
-                    # Insert empty string for missing/null values
-                    ws.cell(row=header_row + 1 + i, column=col_idx, value="")
+                    cell.value = ""        # empty string for missing/null values
+                cell.alignment = _wrap     # wrap so nothing overflows neighbours
             else:
                 print(f"⚠️ Column '{col_upper}' not found in cost sheet template")
 
-    print(f"✅ Inserted {len(df_out)} rows of data into cost sheet")
+    print(f"✅ Inserted {len(df_out)} rows of data into cost sheet (wrapped, cleaned)")
 
     # ── EXT COST formula: = UNIT QTY * COST EACH for every data row (LD)
     from openpyxl.utils import get_column_letter
@@ -613,8 +626,9 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH,
         ec_col_idx = excel_headers['EXT COST']
         for row_offset in range(len(df_out)):
             data_row = header_row + 1 + row_offset
+            # IFERROR so a blank/"N/A" qty or cost shows blank, not #VALUE!
             ws.cell(row=data_row, column=ec_col_idx,
-                    value=f'={uq_letter}{data_row}*{ce_letter}{data_row}')
+                    value=f'=IFERROR({uq_letter}{data_row}*{ce_letter}{data_row},"")')
         print(f"[FORMULA] EXT COST formula written for {len(df_out)} rows")
     else:
         missing = [k for k in _needed if k not in excel_headers]
