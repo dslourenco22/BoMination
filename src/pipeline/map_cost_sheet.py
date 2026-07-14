@@ -644,6 +644,18 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH,
 
     print(f"✅ Inserted {len(df_out)} rows of data into cost sheet (wrapped, cleaned)")
 
+    # Collapse the empty spare rows between the last data row and the summary
+    # section so the pricing rollup sits right under the data (no big blank gap).
+    # Rows are HIDDEN, not deleted — so the summary's formula cell references
+    # (=SUM(K13:K250) etc.) stay valid.
+    if summary_start:
+        first_gap = header_row + 1 + len(df_out)
+        for r in range(first_gap, summary_start):
+            ws.row_dimensions[r].hidden = True
+        if summary_start > first_gap:
+            print(f"🙈 Hid {summary_start - first_gap} empty spare rows "
+                  f"({first_gap}–{summary_start - 1}) above the summary")
+
     # ── EXT COST formula: = UNIT QTY * COST EACH for every data row (LD)
     from openpyxl.utils import get_column_letter
 
