@@ -187,3 +187,6 @@ chromedriver.exe
 # Temporary files
 *.tmp
 *.temp
+
+# Excel temp/lock files
+~$*

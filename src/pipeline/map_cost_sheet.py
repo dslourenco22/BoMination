@@ -579,11 +579,39 @@ def map_and_insert_data(oem_path, merged_path, template_path=OMNI_TEMPLATE_PATH,
 
     print("Mapped headers from cost sheet:", excel_headers)
 
-    # Clear all data rows in the template before writing so stale content
-    # from previous runs doesn't bleed through below our new data. Clear well
-    # past the end of THIS run's data so nothing is ever left behind.
-    _clear_to = header_row + 1 + max(300, len(df_out) + 100)
-    for clear_row in range(header_row + 1, _clear_to):
+    # Find where the pricing rollup / summary section begins so we NEVER wipe it
+    # (labels like TOTAL / DIRECT LABOR / PRICE - FOB OMNI, or a =SUM(K...) below
+    # the data). We only clear the data region ABOVE that section.
+    summary_labels = ('TOTAL', 'DIRECT LABOR', 'PRICE - FOB OMNI', 'TOTAL PROJECT VALUE',
+                      'GRAND TOTAL', 'SUBTOTAL', 'DOMESTIC', 'FINAL COST', 'FINAL PRICE')
+    summary_start = None
+    for r in range(header_row + 2, ws.max_row + 1):
+        for col in range(1, ws.max_column + 1):
+            v = ws.cell(row=r, column=col).value
+            if isinstance(v, str):
+                vt = v.strip().upper()
+                if vt in summary_labels or vt.startswith('=SUM(K'):
+                    summary_start = r
+                    break
+        if summary_start:
+            break
+
+    # Clear the data rows before writing so stale content from previous runs
+    # doesn't bleed through — but stop BEFORE the summary section.
+    if summary_start:
+        clear_end = summary_start
+        print(f"🔒 Preserving pricing/summary section from row {summary_start} down")
+    else:
+        clear_end = header_row + 1 + max(300, len(df_out) + 100)
+
+    # If the BOM is bigger than the space above the summary, its rows would collide
+    # with (and overwrite) the rollup — warn so it's not silently wrong.
+    if summary_start and len(df_out) > (summary_start - (header_row + 1)):
+        print(f"⚠️ BOM has {len(df_out)} rows but only {summary_start - (header_row + 1)} "
+              f"fit above the summary section (starts row {summary_start}) — some rows "
+              f"may overlap the rollup. Consider expanding the template.")
+
+    for clear_row in range(header_row + 1, clear_end):
         for col_idx in excel_headers.values():
             ws.cell(row=clear_row, column=col_idx).value = None
 
