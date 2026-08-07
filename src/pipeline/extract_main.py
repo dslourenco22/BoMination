@@ -397,6 +397,48 @@ def _extract_native_tables(pdf_page, label=''):
         return []
 
 
+def _group_words_into_lines(words):
+    """Cluster words into visual rows by vertical overlap. (LD)
+
+    Replaces a fixed grid — round(top / 3.0) — which was a bucket, not a
+    tolerance: two rows up to 3px apart could share one bucket, and sorting
+    that merged bucket by x0 interleaved both rows character by character
+    ('120VAC' + 'QUICKC' -> '1Q2U0IVCAKC'). Digital PDFs have exact baselines
+    so the grid held up; OCR'd scans jitter and it did not.
+
+    A word joins a row when its vertical span overlaps the row's band by at
+    least half the word's height. The band expands to follow gradual skew but
+    is capped, so it can never grow until it swallows the row below.
+    """
+    if not words:
+        return []
+
+    heights = sorted(w['bottom'] - w['top'] for w in words)
+    med_h = heights[len(heights) // 2] or 1.0
+    max_band = med_h * 1.6          # a single row never spans more than this
+
+    rows = []
+    for w in sorted(words, key=lambda w: (w['top'], w['x0'])):
+        w_h = w['bottom'] - w['top']
+        placed = False
+        # Words arrive top-down, so only the most recent rows can still be open.
+        for row in reversed(rows[-3:]):
+            overlap = min(w['bottom'], row['bottom']) - max(w['top'], row['top'])
+            if overlap >= 0.5 * w_h:
+                new_top = min(row['top'], w['top'])
+                new_bottom = max(row['bottom'], w['bottom'])
+                if new_bottom - new_top <= max_band:
+                    row['words'].append(w)
+                    row['top'], row['bottom'] = new_top, new_bottom
+                    placed = True
+                    break
+        if not placed:
+            rows.append({'top': w['top'], 'bottom': w['bottom'], 'words': [w]})
+
+    rows.sort(key=lambda r: r['top'])
+    return [sorted(r['words'], key=lambda w: w['x0']) for r in rows]
+
+
 def _extract_text_aligned_table(page, label='', prev=None):
     """Parse a GRIDLESS, text-aligned BOM table using word x-positions.
 
@@ -420,11 +462,8 @@ def _extract_text_aligned_table(page, label='', prev=None):
     if not words:
         return None, None, None
 
-    # Group words into lines by vertical position (3px tolerance).
-    lines = {}
-    for w in words:
-        lines.setdefault(round(w['top'] / 3.0), []).append(w)
-    line_items = [sorted(ws, key=lambda w: w['x0']) for _, ws in sorted(lines.items())]
+    # Group words into visual rows (overlap-based; tolerates OCR baseline jitter).
+    line_items = _group_words_into_lines(words)
 
     # Locate the header line (the one with the most BOM keywords).
     names, anchors, start = None, None, 0
@@ -637,11 +676,16 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
         return []
     finally:
         if ocr_generated and searchable_path != pdf_path:
-            try:
-                from pipeline.ocr_preprocessor import cleanup_ocr_temp_files
-                cleanup_ocr_temp_files(searchable_path)
-            except Exception:
-                pass
+            # BOM_KEEP_OCR=1 keeps the OCR'd PDF on disk so its text layer can be
+            # inspected after a bad extraction. Debug only — these are large. (LD)
+            if os.environ.get('BOM_KEEP_OCR', '').strip() not in ('', '0', 'false', 'False'):
+                print(f'[LLM] BOM_KEEP_OCR set — keeping OCR output: {searchable_path}')
+            else:
+                try:
+                    from pipeline.ocr_preprocessor import cleanup_ocr_temp_files
+                    cleanup_ocr_temp_files(searchable_path)
+                except Exception:
+                    pass
 
 
 def clean_and_filter_tables(tables, method_name):
