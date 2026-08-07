@@ -277,6 +277,42 @@ def parse_ollama_response_as_tables(response_text):
     return [df]
 
 
+def _gutter_from_repeated_header(pdf_page, words):
+    """Locate the gutter between two side-by-side tables. (LD)
+
+    Both tables carry the same headers, so the shared header line reads as one
+    sequence repeated twice — [PN PN Mfr Desc Qty UoM | PN PN Mfr Desc Qty UoM].
+    The boundary is the gap where the sequence restarts. This beats guessing from
+    geometry: a midpoint between a keyword's two occurrences, or the widest
+    word-free gap, both land inside a table when column widths are uneven.
+
+    Returns an x coordinate, or None when no repeated header is found.
+    """
+    BOM_KW = ['PART', 'QTY', 'QUANTITY', 'DESCRIPTION', 'MANUFACTURER', 'MFR',
+              'MFG', 'ITEM', 'MPN', 'UOM', 'MODEL', 'VENDOR', 'SUPPLIER', 'PN']
+    best_ln, best_score = None, 3
+    for ln in _group_words_into_lines(words):
+        t = ' '.join(w['text'] for w in ln).upper()
+        score = sum(1 for kw in BOM_KW if kw in t)
+        if score > best_score:
+            best_score, best_ln = score, ln
+
+    if not best_ln or len(best_ln) < 4 or len(best_ln) % 2:
+        return None
+
+    half = len(best_ln) // 2
+    left = [w['text'].upper() for w in best_ln[:half]]
+    right = [w['text'].upper() for w in best_ln[half:]]
+    matches = sum(1 for a, b in zip(left, right) if a == b)
+    if matches < max(2, int(0.6 * half)):        # tolerate some OCR noise
+        return None
+
+    gutter = (best_ln[half - 1]['x1'] + best_ln[half]['x0']) / 2
+    print(f'[SPLIT] repeated header {left} x2 ({matches}/{half} matched) '
+          f'— gutter at x={gutter:.0f}')
+    return gutter
+
+
 def _split_two_column_page(pdf_page):
     """
     Contextually detect two side-by-side BOM tables on a page.
@@ -303,42 +339,30 @@ def _split_two_column_page(pdf_page):
                 kw_positions.setdefault(key, []).append(w['x0'])
 
         # For each keyword, check if it appears at two x-positions far enough apart
-        left_anchors, right_anchors = [], []
+        split_candidates = []
         for kw, positions in kw_positions.items():
             if len(positions) < 2:
                 continue
             for i, xi in enumerate(sorted(positions)):
                 for xj in sorted(positions)[i + 1:]:
                     if xj - xi >= page_w * 0.25:
-                        left_anchors.append(xi)
-                        right_anchors.append(xj)
+                        split_candidates.append((xi + xj) / 2)
                         print(f'[SPLIT] "{kw}" at x={xi:.0f} and x={xj:.0f} — two-column signal')
                         break
 
-        if not left_anchors:
+        if not split_candidates:
             return [pdf_page]
 
-        # The boundary lies right of every left-table anchor and left of every
-        # right-table one. Midpointing a keyword pair lands inside a table when
-        # the columns are unevenly spaced, so search that window for the widest
-        # word-free gap — the actual gutter between the two tables.
-        # Restrict to the middle of the sheet as well: a gap between two columns
-        # of the SAME table can be wider than the gutter, but the gutter of a
-        # two-column layout always sits near the centre.
-        lo = max(max(left_anchors), page_w * 0.30)
-        hi = min(min(right_anchors), page_w * 0.70)
-        if hi <= lo:
-            lo, hi = max(left_anchors), min(right_anchors)
-        spans = sorted((w['x0'], w['x1']) for w in words if w['x1'] > lo and w['x0'] < hi)
-        best_gap, split_x = 0.0, (lo + hi) / 2
-        cursor = lo
-        for x0, x1 in spans:
-            if x0 - cursor > best_gap:
-                best_gap, split_x = x0 - cursor, (cursor + x0) / 2
-            cursor = max(cursor, x1)
-        if hi - cursor > best_gap:
-            best_gap, split_x = hi - cursor, (cursor + hi) / 2
-        print(f'[SPLIT] gutter search in x=[{lo:.0f},{hi:.0f}] — widest gap {best_gap:.0f}px')
+        # Prefer the structural signal: two side-by-side tables repeat the SAME
+        # header sequence, so the header line reads [A B C D | A B C D]. Putting
+        # the boundary in the gap where that sequence restarts uses the layout's
+        # actual structure. Geometric guesses (midpoints, widest gap) land inside
+        # a table whenever column widths are uneven.
+        split_x = _gutter_from_repeated_header(pdf_page, words)
+        if split_x is None:
+            # Fall back to the median keyword midpoint.
+            split_x = sorted(split_candidates)[len(split_candidates) // 2]
+            print(f'[SPLIT] no repeated header — midpoint estimate x={split_x:.0f}')
 
         # Both sides must have meaningful content (not just whitespace)
         left_count  = sum(1 for w in words if w['x1'] <= split_x)
@@ -686,17 +710,11 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
                     all_raw_tables.extend(native)
                     continue  # both columns captured — skip split + LLM
 
-                # ── Secondary: text-position parsing for GRIDLESS tables ──
-                # Reliable for borderless BOMs (and skips metadata preamble),
-                # where a small LLM tends to hallucinate or collapse columns.
-                aligned_df, a_names, a_anchors = _extract_text_aligned_table(
-                    page, f'Page {idx + 1}', prev=last_table_meta)
-                if aligned_df is not None and len(aligned_df) >= 2:
-                    last_table_meta = (a_names, a_anchors)
-                    all_raw_tables.append(aligned_df)
-                    continue  # parsed positionally — skip LLM
-
-                # ── Fallback: split + LLM ─────────────────────────────────
+                # ── Split BEFORE text parsing ─────────────────────────────
+                # Two side-by-side tables share one header line, so parsing the
+                # whole page yields a single double-width table (12 cols for two
+                # 6-col BOMs) with each row holding two unrelated parts. Split
+                # first, then parse each half as the clean table it is.
                 sub_pages = _split_two_column_page(page)
 
                 for col_idx, sub_page in enumerate(sub_pages):
@@ -704,6 +722,18 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
                         f'Page {idx + 1}' if len(sub_pages) == 1
                         else f'Page {idx + 1} col {col_idx + 1}'
                     )
+
+                    # ── Secondary: text-position parsing for GRIDLESS tables ──
+                    # Reliable for borderless BOMs (and skips metadata preamble),
+                    # where a small LLM tends to hallucinate or collapse columns.
+                    col_df, c_names, c_anchors = _extract_text_aligned_table(
+                        sub_page, prefix, prev=last_table_meta)
+                    if col_df is not None and len(col_df) >= 2:
+                        last_table_meta = (c_names, c_anchors)
+                        all_raw_tables.append(col_df)
+                        continue  # parsed positionally — skip LLM
+
+                    # ── Fallback: LLM ─────────────────────────────────────
                     page_text = _page_text_by_rows(sub_page)
                     if not page_text.strip():
                         print(f'[LLM] {prefix}: no text, skipping')
