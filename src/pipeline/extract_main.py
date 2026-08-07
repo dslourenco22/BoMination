@@ -505,12 +505,16 @@ def _split_into_chunks(text, chunk_size=10000, overlap=500):
     while start < len(text):
         end = start + chunk_size
         chunk = text[start:end]
-        if end < len(text):
-            last_nl = chunk.rfind('\n')
-            if last_nl > chunk_size // 2:
-                chunk = chunk[:last_nl]
+        # Final chunk reaches the end — emit it and stop. Without this the
+        # tail keeps getting re-sliced at start = len(text) - overlap forever. (LD)
+        if end >= len(text):
+            chunks.append(chunk)
+            break
+        last_nl = chunk.rfind('\n')
+        if last_nl > chunk_size // 2:
+            chunk = chunk[:last_nl]
         chunks.append(chunk)
-        start += len(chunk) - overlap
+        start += max(len(chunk) - overlap, 1)   # never stall or move backwards (LD)
     return chunks
 
 

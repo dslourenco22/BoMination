@@ -385,8 +385,8 @@ def preprocess_pdf_for_table_extraction(pdf_path, output_path=None, enhance_for_
         
         # Run OCR preprocessing
         ocrmypdf.ocr(
-            input_file=pdf_path,
-            output_file=output_path,
+            pdf_path,
+            output_path,
             language='eng',
             deskew=True,
             clean=True,
@@ -400,9 +400,8 @@ def preprocess_pdf_for_table_extraction(pdf_path, output_path=None, enhance_for_
             jpeg_quality=95, # High quality
             png_quality=95,  # High quality
             tesseract_config=tesseract_config,
-            progress_bar=False,
-            quiet=True
-        )
+            progress_bar=False
+        )                         # NOTE: no `quiet=` — dropped in OCRmyPDF 17
         
         if os.path.exists(output_path):
             logger.info(f"[OK] Table-optimized OCR preprocessing completed: {output_path}")
@@ -470,9 +469,12 @@ def preprocess_pdf_with_ocr(pdf_path, output_path=None, force_ocr=False):
         import ocrmypdf
         
         # OCR the PDF with optimized settings for table extraction
+        # Input/output are passed positionally: OCRmyPDF 17 renamed the first
+        # parameter to `input_file_or_options`, so `input_file=` no longer binds.
+        # Positional works on every version.
         ocrmypdf.ocr(
-            input_file=str(pdf_path),
-            output_file=str(output_path),
+            str(pdf_path),
+            str(output_path),
             deskew=True,          # Correct page rotation
             remove_background=False,  # Keep backgrounds for table detection
             optimize=1,           # Light optimization to keep structure
@@ -482,9 +484,8 @@ def preprocess_pdf_with_ocr(pdf_path, output_path=None, force_ocr=False):
             language='eng',       # English language for OCR
             oversample=600,       # Rasterize at 600 DPI instead of 400 for better table lines
             image_dpi=600,        # Ensure embedded images use 600 DPI
-            progress_bar=False,   # Disable progress bar for cleaner output
-            quiet=True           # Reduce verbose output
-        )
+            progress_bar=False    # Disable progress bar for cleaner output
+        )                         # NOTE: no `quiet=` — dropped in OCRmyPDF 17
         
         if output_path.exists():
             logger.info(f"[OK] OCR preprocessing completed successfully")
