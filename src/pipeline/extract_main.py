@@ -439,6 +439,42 @@ def _group_words_into_lines(words):
     return [sorted(r['words'], key=lambda w: w['x0']) for r in rows]
 
 
+def _page_text_by_rows(page):
+    """Rebuild page text as one visual row per line, for the LLM path. (LD)
+
+    extract_text(layout=True) has the same flaw the old row grid had: it merges
+    tightly-spaced lines — notably the wrapped lines inside one description
+    cell — then orders the merged row by x, interleaving them character by
+    character ('CONNECTOR' + 'TIN-PLATED' -> 'CTONNPNLAECTTEODR'). Clustering
+    rows by vertical overlap keeps wrapped lines apart. Column gaps are kept as
+    proportional padding so the model still sees the table's shape.
+    """
+    try:
+        words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+    except Exception:
+        return page.extract_text() or ''
+    if not words:
+        return ''
+
+    # Median character width, to convert x-gaps into space counts.
+    widths = sorted((w['x1'] - w['x0']) / max(len(w['text']), 1) for w in words)
+    char_w = widths[len(widths) // 2] or 1.0
+
+    lines = []
+    for row in _group_words_into_lines(words):
+        parts, prev_x1 = [], None
+        for w in row:
+            if prev_x1 is not None:
+                pad = int(round((w['x0'] - prev_x1) / char_w))
+                parts.append(' ' * max(1, min(pad, 12)))   # cap runaway padding
+            parts.append(w['text'])
+            prev_x1 = w['x1']
+        line = ''.join(parts).rstrip()
+        if line:
+            lines.append(line)
+    return '\n'.join(lines)
+
+
 def _extract_text_aligned_table(page, label='', prev=None):
     """Parse a GRIDLESS, text-aligned BOM table using word x-positions.
 
@@ -627,10 +663,7 @@ def extract_tables_from_pdf(pdf_path, pages='all'):
                         f'Page {idx + 1}' if len(sub_pages) == 1
                         else f'Page {idx + 1} col {col_idx + 1}'
                     )
-                    try:
-                        page_text = sub_page.extract_text(layout=True) or ''
-                    except TypeError:
-                        page_text = sub_page.extract_text() or ''
+                    page_text = _page_text_by_rows(sub_page)
                     if not page_text.strip():
                         print(f'[LLM] {prefix}: no text, skipping')
                         continue

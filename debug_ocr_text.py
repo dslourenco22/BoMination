@@ -15,6 +15,9 @@ from pathlib import Path
 
 import pdfplumber
 
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+from pipeline.extract_main import _group_words_into_lines, _page_text_by_rows
+
 
 def dump(pdf_path, page_no=0):
     with pdfplumber.open(pdf_path) as pdf:
@@ -39,22 +42,31 @@ def dump(pdf_path, page_no=0):
             seen[key] = c["text"]
         print(f"overlapping chars: {dupes}")
 
-        # 2. First rows as the code groups them, so we can compare directly
-        #    against what lands in the spreadsheet.
-        print("\n--- first 25 rows, by vertical band ---")
+        # 2. OLD grouping: the fixed round(top / 3.0) grid.
+        print("\n--- OLD row grid, first 25 rows ---")
         rows = {}
         for w in words:
             rows.setdefault(round(w["top"] / 3.0), []).append(w)
-        for i, (_, ws) in enumerate(sorted(rows.items())[:25]):
+        for _, ws in sorted(rows.items())[:25]:
             line = " ".join(w["text"] for w in sorted(ws, key=lambda w: w["x0"]))
             print(f"  {line[:160]}")
 
-        # 3. Exactly what the LLM path feeds to Ollama.
-        print("\n--- extract_text(layout=True), first 25 non-blank lines ---")
+        # 3. NEW grouping: overlap-based clustering, same code the pipeline uses.
+        print("\n--- NEW row clustering, first 25 rows ---")
+        for row in _group_words_into_lines(words)[:25]:
+            print(f"  {' '.join(w['text'] for w in row)[:160]}")
+
+        # 4. Old vs new text for the LLM.
+        print("\n--- OLD extract_text(layout=True), first 15 non-blank ---")
         txt = page.extract_text(layout=True) or ""
-        for line in [l for l in txt.split("\n") if l.strip()][:25]:
+        for line in [l for l in txt.split("\n") if l.strip()][:15]:
             print(f"  {line[:160]}")
-        print(f"\ntotal chars from layout=True: {len(txt)}")
+
+        print("\n--- NEW _page_text_by_rows, first 15 non-blank ---")
+        new_txt = _page_text_by_rows(page)
+        for line in [l for l in new_txt.split("\n") if l.strip()][:15]:
+            print(f"  {line[:160]}")
+        print(f"\nchars: layout=True {len(txt)} -> row-based {len(new_txt)}")
 
 
 if __name__ == "__main__":
