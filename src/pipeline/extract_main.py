@@ -303,22 +303,42 @@ def _split_two_column_page(pdf_page):
                 kw_positions.setdefault(key, []).append(w['x0'])
 
         # For each keyword, check if it appears at two x-positions far enough apart
-        split_candidates = []
+        left_anchors, right_anchors = [], []
         for kw, positions in kw_positions.items():
             if len(positions) < 2:
                 continue
             for i, xi in enumerate(sorted(positions)):
                 for xj in sorted(positions)[i + 1:]:
                     if xj - xi >= page_w * 0.25:
-                        split_candidates.append((xi + xj) / 2)
+                        left_anchors.append(xi)
+                        right_anchors.append(xj)
                         print(f'[SPLIT] "{kw}" at x={xi:.0f} and x={xj:.0f} — two-column signal')
                         break
 
-        if not split_candidates:
+        if not left_anchors:
             return [pdf_page]
 
-        # Use the median candidate as the split line
-        split_x = sorted(split_candidates)[len(split_candidates) // 2]
+        # The boundary lies right of every left-table anchor and left of every
+        # right-table one. Midpointing a keyword pair lands inside a table when
+        # the columns are unevenly spaced, so search that window for the widest
+        # word-free gap — the actual gutter between the two tables.
+        # Restrict to the middle of the sheet as well: a gap between two columns
+        # of the SAME table can be wider than the gutter, but the gutter of a
+        # two-column layout always sits near the centre.
+        lo = max(max(left_anchors), page_w * 0.30)
+        hi = min(min(right_anchors), page_w * 0.70)
+        if hi <= lo:
+            lo, hi = max(left_anchors), min(right_anchors)
+        spans = sorted((w['x0'], w['x1']) for w in words if w['x1'] > lo and w['x0'] < hi)
+        best_gap, split_x = 0.0, (lo + hi) / 2
+        cursor = lo
+        for x0, x1 in spans:
+            if x0 - cursor > best_gap:
+                best_gap, split_x = x0 - cursor, (cursor + x0) / 2
+            cursor = max(cursor, x1)
+        if hi - cursor > best_gap:
+            best_gap, split_x = hi - cursor, (cursor + hi) / 2
+        print(f'[SPLIT] gutter search in x=[{lo:.0f},{hi:.0f}] — widest gap {best_gap:.0f}px')
 
         # Both sides must have meaningful content (not just whitespace)
         left_count  = sum(1 for w in words if w['x1'] <= split_x)
@@ -523,12 +543,25 @@ def _extract_text_aligned_table(page, label='', prev=None):
         # at the BOTTOM of the table and number rows upward from it. When almost
         # nothing follows the header but plenty precedes it, read upward instead
         # — otherwise there are no data rows and the whole page falls to the LLM.
-        below, above = len(line_items) - best_i - 1, best_i
-        if below < 2 <= above:
-            data_rows = list(reversed(line_items[:best_i]))   # item 1 sits nearest
-            print(f'[ALIGNED] {label}: header at bottom — reading {above} rows upward')
+        # Pick the side by which one actually holds table rows, not by row count:
+        # a title block below the table and a metadata preamble above it both
+        # inflate a naive count. A real data row spreads across >=3 columns.
+        def _table_like(lines):
+            n = 0
+            for ln in lines:
+                bins = {min(range(len(anchors)), key=lambda i: abs(anchors[i] - w['x0']))
+                        for w in ln}
+                if len(bins) >= 3:
+                    n += 1
+            return n
+
+        above_rows, below_rows = line_items[:best_i], line_items[best_i + 1:]
+        n_above, n_below = _table_like(above_rows), _table_like(below_rows)
+        if n_above > n_below:
+            data_rows = above_rows           # keep visual top-to-bottom order
+            print(f'[ALIGNED] {label}: header at bottom — {n_above} rows above it')
         else:
-            data_rows = line_items[best_i + 1:]
+            data_rows = below_rows
     elif prev:
         names, anchors = prev                          # continuation page — reuse columns
         data_rows = line_items

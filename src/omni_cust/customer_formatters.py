@@ -2281,14 +2281,16 @@ def clean_eos_columns(df):
         'DRAWN', 'CHECKED BY', 'FINISH', 'SCALE', 'SHEET', 'ZONE', 'REV.',
     ]
     before = len(df)
-    joined = df.astype(str).apply(lambda r: ' '.join(r).upper(), axis=1)
-    df = df[~joined.apply(lambda t: any(n in t for n in noise))]
+    if not df.empty:
+        joined = df.astype(str).apply(lambda r: ' '.join(r).upper(), axis=1)
+        df = df[~joined.apply(lambda t: any(n in t for n in noise))]
     if before != len(df):
         print(f"🔧 EOS DEBUG: Removed {before - len(df)} drawing/title-block row(s)")
 
-    # A real BOM line needs a part number or a description.
+    # A real BOM line needs a part number or a description. Guard the empty case:
+    # DataFrame.apply(axis=1) on zero rows returns a DataFrame, not a Series.
     keep_cols = [c for c in ('Part Number', 'Description') if c in df.columns]
-    if keep_cols:
+    if keep_cols and not df.empty:
         has_content = df[keep_cols].astype(str).apply(
             lambda r: any(v.strip() and v.strip().lower() != 'nan' for v in r), axis=1)
         dropped = int((~has_content).sum())
@@ -2338,7 +2340,23 @@ def apply_customer_formatter(df, customer_name=None):
     """
     if df.empty:
         return df
-    
+
+    # Duplicate column labels make df[col] return a DataFrame instead of a
+    # Series, which breaks every formatter downstream. Drawing BOMs hit this
+    # routinely — EOS heads both part columns "PN".
+    if df.columns.duplicated().any():
+        seen, cols = {}, []
+        for c in df.columns:
+            if c in seen:
+                seen[c] += 1
+                cols.append(f"{c}_{seen[c]}")
+            else:
+                seen[c] = 0
+                cols.append(c)
+        print(f"🔧 CUSTOMER FORMATTER: De-duplicated column labels -> {cols}")
+        df = df.copy()
+        df.columns = cols
+
     # Normalize customer name
     if customer_name:
         customer_name = customer_name.lower().strip()
