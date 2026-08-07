@@ -16,7 +16,8 @@ from pathlib import Path
 import pdfplumber
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
-from pipeline.extract_main import _group_words_into_lines, _page_text_by_rows
+from pipeline.extract_main import (_group_words_into_lines, _page_text_by_rows,
+                                   _extract_text_aligned_table)
 
 
 def dump(pdf_path, page_no=0):
@@ -67,6 +68,35 @@ def dump(pdf_path, page_no=0):
         for line in [l for l in new_txt.split("\n") if l.strip()][:15]:
             print(f"  {line[:160]}")
         print(f"\nchars: layout=True {len(txt)} -> row-based {len(new_txt)}")
+
+        # 5. Why the deterministic parser bails. If it finds a header it parses
+        #    the table directly and the LLM is never involved.
+        BOM_KW = ['PART', 'QTY', 'QUANTITY', 'DESCRIPTION', 'MANUFACTURER', 'MFR',
+                  'MFG', 'ITEM', 'MPN', 'PACKAGE', 'CATEGORY', 'UOM', 'MODEL',
+                  'VENDOR', 'SUPPLIER', 'REF']
+        print("\n--- header candidates (need score > 1) ---")
+        scored = []
+        for i, row in enumerate(_group_words_into_lines(words)):
+            t = " ".join(w["text"] for w in row).upper()
+            hits = [k for k in BOM_KW if k in t]
+            if hits:
+                scored.append((len(hits), i, hits, t))
+        scored.sort(reverse=True)
+        for score, i, hits, t in scored[:8]:
+            print(f"  score={score} row={i} {hits}")
+            print(f"     {t[:150]}")
+        if not scored:
+            print("  NONE — no row contains any BOM keyword")
+
+        print("\n--- aligned-table parse result ---")
+        for lbl, pg in (("full page", page),
+                        ("left half", page.crop((0, 0, page.width / 2, page.height))),
+                        ("right half", page.crop((page.width / 2, 0, page.width, page.height)))):
+            df, names, _ = _extract_text_aligned_table(pg, lbl)
+            if df is None:
+                print(f"  {lbl}: FAILED (no header / <3 columns / <2 rows)")
+            else:
+                print(f"  {lbl}: {len(df)} rows x {len(names)} cols -> {names}")
 
 
 if __name__ == "__main__":
