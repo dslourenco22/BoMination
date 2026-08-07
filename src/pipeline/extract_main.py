@@ -502,7 +502,7 @@ def _extract_text_aligned_table(page, label='', prev=None):
     line_items = _group_words_into_lines(words)
 
     # Locate the header line (the one with the most BOM keywords).
-    names, anchors, start = None, None, 0
+    names, anchors, data_rows = None, None, []
     best_i, best_score = None, 1
     for i, ln in enumerate(line_items):
         t = ' '.join(w['text'] for w in ln).upper()
@@ -519,10 +519,19 @@ def _extract_text_aligned_table(page, label='', prev=None):
                 names.append(cur['text'])
             else:
                 names[-1] += ' ' + cur['text']         # same column (multi-word header)
-        start = best_i + 1
+        # Engineering-drawing BOMs (EOS, and drawings generally) put the header
+        # at the BOTTOM of the table and number rows upward from it. When almost
+        # nothing follows the header but plenty precedes it, read upward instead
+        # — otherwise there are no data rows and the whole page falls to the LLM.
+        below, above = len(line_items) - best_i - 1, best_i
+        if below < 2 <= above:
+            data_rows = list(reversed(line_items[:best_i]))   # item 1 sits nearest
+            print(f'[ALIGNED] {label}: header at bottom — reading {above} rows upward')
+        else:
+            data_rows = line_items[best_i + 1:]
     elif prev:
         names, anchors = prev                          # continuation page — reuse columns
-        start = 0
+        data_rows = line_items
     else:
         return None, None, None
 
@@ -534,8 +543,7 @@ def _extract_text_aligned_table(page, label='', prev=None):
     # start at column 2. If the DATA rows consistently have content to the LEFT of
     # the first anchor, recover that missed leading column (the classifier will
     # name it by content). Likewise catch one missed column on the right.
-    data_lines = line_items[start:start + 12]
-    left_xs = [w['x0'] for ln in data_lines for w in ln if w['x0'] < anchors[0] - 12]
+    left_xs = [w['x0'] for ln in data_rows[:12] for w in ln if w['x0'] < anchors[0] - 12]
     if len(left_xs) >= 3:
         anchors.insert(0, min(left_xs))
         names.insert(0, 'Column_L')
@@ -551,7 +559,7 @@ def _extract_text_aligned_table(page, label='', prev=None):
         return len(anchors) - 1
 
     rows = []
-    for ln in line_items[start:]:
+    for ln in data_rows:
         cells = [''] * len(anchors)
         for w in ln:
             cells[_col_of(w['x0'])] = (cells[_col_of(w['x0'])] + ' ' + w['text']).strip()

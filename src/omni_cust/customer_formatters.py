@@ -2201,6 +2201,111 @@ def clean_amazon_columns(df):
     return df
 
 
+def clean_eos_columns(df):
+    """
+    Clean Eos Energy engineering-drawing BOMs.
+
+    These come off drawings rather than BOM exports, so they look like this:
+      - header at the BOTTOM of the table, rows numbered upward from it
+      - columns: PN | PN | Manufacturer | Description | Qty | UoM, where the
+        first PN is a reference designator (CLG6, L613, TB6) and the second is
+        the manufacturer part number (F2X4LC6, 92240A718)
+      - two side-by-side tables per sheet, already split upstream
+      - title block, revision table and approval stamps mixed into the text
+    Because both part columns are literally headed "PN", mapping is anchored on
+    the Manufacturer/Description/Qty columns and assigned positionally.
+    """
+    print(f"\n🔧 EOS DEBUG: Original table shape: {df.shape}")
+
+    if df.empty:
+        print("🔧 EOS DEBUG: Empty dataframe passed to clean_eos_columns")
+        return df
+
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Drop the header row if it survived extraction as data.
+    hdr_kw = ['MANUFACTURER', 'DESCRIPTION', 'QTY', 'UOM']
+    is_hdr = df.apply(
+        lambda r: sum(any(k in str(c).upper() for k in hdr_kw) for c in r) >= 3, axis=1)
+    if is_hdr.any():
+        print(f"🔧 EOS DEBUG: Dropping {int(is_hdr.sum())} embedded header row(s)")
+        df = df[~is_hdr]
+
+    # Anchor on the columns we can name with confidence, then fill in the rest
+    # by position: everything left of Manufacturer is a part number, and the
+    # leftmost of those is the reference designator.
+    # Rename by POSITION, not by name: both part columns are headed "PN", so a
+    # name-keyed mapping would collapse them into one.
+    upper = [c.upper() for c in df.columns]
+    new_cols, assigned = list(df.columns), set()
+
+    mfr_i = next((i for i, c in enumerate(upper) if 'MANUFACTURER' in c or 'MFR' in c), None)
+    if mfr_i is not None:
+        new_cols[mfr_i] = 'Manufacturer'
+        assigned.add(mfr_i)
+        if mfr_i >= 2:                      # ref designator, then real part number
+            new_cols[0], new_cols[1] = 'Reference', 'Part Number'
+            assigned.update((0, 1))
+        elif mfr_i == 1:
+            new_cols[0] = 'Part Number'
+            assigned.add(0)
+
+    for i, up in enumerate(upper):
+        if i in assigned:
+            continue
+        if 'DESCRIPTION' in up or 'DESC' in up:
+            new_cols[i] = 'Description'
+        elif 'QTY' in up or 'QUANTITY' in up:
+            new_cols[i] = 'Quantity'
+        elif 'UOM' in up or up.strip() in ('UNIT', 'U/M'):
+            new_cols[i] = 'Unit'
+
+    # Never hand back duplicate labels — downstream indexing would break.
+    seen = {}
+    for i, c in enumerate(new_cols):
+        if c in seen:
+            seen[c] += 1
+            new_cols[i] = f"{c}_{seen[c]}"
+        else:
+            seen[c] = 0
+    if new_cols != list(df.columns):
+        print(f"🔧 EOS DEBUG: Column mapping: {dict(zip(df.columns, new_cols))}")
+        df.columns = new_cols
+
+    # Strip drawing furniture that is not part of the BOM.
+    noise = [
+        'PROPRIETARY AND CONFIDENTIAL', 'DO NOT SCALE DRAWING', 'FOR APPROVAL',
+        'FOR REFERENCE ONLY', 'SEE SEPARATE PARTS LIST', 'THIRD ANGLE PROJECTION',
+        'REVISIONS', 'INITIAL RELEASE', 'BILL OF MATERIALS', 'EOS ENERGY',
+        'DRAWN', 'CHECKED BY', 'FINISH', 'SCALE', 'SHEET', 'ZONE', 'REV.',
+    ]
+    before = len(df)
+    joined = df.astype(str).apply(lambda r: ' '.join(r).upper(), axis=1)
+    df = df[~joined.apply(lambda t: any(n in t for n in noise))]
+    if before != len(df):
+        print(f"🔧 EOS DEBUG: Removed {before - len(df)} drawing/title-block row(s)")
+
+    # A real BOM line needs a part number or a description.
+    keep_cols = [c for c in ('Part Number', 'Description') if c in df.columns]
+    if keep_cols:
+        has_content = df[keep_cols].astype(str).apply(
+            lambda r: any(v.strip() and v.strip().lower() != 'nan' for v in r), axis=1)
+        dropped = int((~has_content).sum())
+        if dropped:
+            print(f"🔧 EOS DEBUG: Removed {dropped} row(s) with no part number or description")
+        df = df[has_content]
+
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = df[col].astype(str).str.strip().replace(['nan', 'NaN', ''], pd.NA)
+
+    df = df.reset_index(drop=True)
+    print(f"🔧 EOS DEBUG: Final cleaned table shape: {df.shape}")
+    print(f"🔧 EOS DEBUG: Final columns: {df.columns.tolist()}")
+    return df
+
+
 CUSTOMER_FORMATTERS = {
     'farrell': clean_farrell_columns,
     'nel': clean_nel_columns,
@@ -2209,7 +2314,13 @@ CUSTOMER_FORMATTERS = {
     'riley_power': clean_riley_power_columns,
     'shanklin': clean_shanklin_columns,
     '901d': clean_901d_columns,
-    'amazon': clean_amazon_columns
+    'amazon': clean_amazon_columns,
+    # The UI passes the display string straight through, so register the spellings
+    # a user or auto-detection might produce.
+    'eos': clean_eos_columns,
+    'eos energy': clean_eos_columns,
+    'eos_energy': clean_eos_columns,
+    'eos energy enterprises': clean_eos_columns
 }
 
 

@@ -257,7 +257,7 @@ with st.sidebar:
 
     company = st.selectbox(
         "Company / Format",
-        options=["", "Farrell", "NEL", "Primetals", "Riley Power", "Shanklin", "901D", "Amazon"],
+        options=["", "Farrell", "NEL", "Primetals", "Riley Power", "Shanklin", "901D", "Amazon", "EOS"],
         help="Selects the column mapping used for the cost sheet. Leave blank for the generic, format-agnostic layout.",
     )
 

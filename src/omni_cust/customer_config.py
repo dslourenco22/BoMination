@@ -13,6 +13,7 @@ CUSTOMER_DISPLAY_NAMES = {
     "shanklin": "Shanklin",
     "901d": "901D",
     "amazon": "Amazon",
+    "eos": "EOS",
     "generic": "Generic/Other"
 }
 
@@ -26,6 +27,7 @@ AUTO_DETECTION_KEYWORDS = {
     "shanklin": ["SHANKLIN", "SHANKLIN CORPORATION"],
     "901d": ["901D", "901-D"],
     "amazon": ["AMAZON", "DEVICE TAG", "LIFECYCLE", "PRODUCTIO"],
+    "eos": ["EOS ENERGY", "EOS ENERGY ENTERPRISES", "EOS ENERGY STORAGE"],
     # Add more customers here as needed
 }
 
@@ -65,6 +67,17 @@ CUSTOMER_SETTINGS = {
     "amazon": {
         "header_keywords": ["DEVICE TAG", "QTY", "MANUFACTURER", "PART NUMBER", "DESCRIPTION", "UL CAT", "CSA"],
         "reject_keywords": ["REVISION", "RELEASED", "LIFECYCLE", "DESIGNED BY", "CHECKED BY", "APPROVED BY"]
+    },
+    "eos": {
+        # Engineering drawings: image-based, two side-by-side BOM tables, and the
+        # header sits at the BOTTOM of each table with rows numbered upward.
+        "force_ocr": True,
+        "header_at_bottom": True,
+        "split_dual_column": True,
+        "header_keywords": ["PN", "MANUFACTURER", "DESCRIPTION", "QTY", "UOM"],
+        "reject_keywords": ["PROPRIETARY AND CONFIDENTIAL", "DO NOT SCALE DRAWING",
+                            "FOR APPROVAL", "FOR REFERENCE ONLY", "SEE SEPARATE PARTS LIST",
+                            "THIRD ANGLE PROJECTION", "REVISIONS", "INITIAL RELEASE"]
     },
     "generic": {
         "header_keywords": ["ITEM", "QTY", "PART", "DESCRIPTION", "MANUFACTURER"]

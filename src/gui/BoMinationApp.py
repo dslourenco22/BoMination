@@ -556,7 +556,7 @@ class BoMApp:
         company_dropdown = ttk.Combobox(
             company_frame,
             textvariable=self.company_name,
-            values=["", "Farrell", "NEL", "Primetals", "Riley Power", "Shanklin", "901D", "Amazon"],
+            values=["", "Farrell", "NEL", "Primetals", "Riley Power", "Shanklin", "901D", "Amazon", "EOS"],
             state="readonly",
             font=("Segoe UI", 10),
             width=30
