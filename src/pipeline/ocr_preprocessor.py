@@ -7,6 +7,7 @@ and compatible with table extraction tools like Tabula and Camelot.
 
 import os
 import sys
+import hashlib
 import tempfile
 import subprocess
 from pathlib import Path
@@ -451,11 +452,25 @@ def preprocess_pdf_with_ocr(pdf_path, output_path=None, force_ocr=False):
         logger.info("[INFO] PDF already appears to have searchable text, skipping OCR")
         return True, str(pdf_path), None
     
-    # Setup output path
+    # Setup output path. With no explicit destination, cache the result keyed on
+    # the file's content hash: OCR is by far the slowest step, and re-running the
+    # same drawing should not pay for it twice. Cache lives outside the
+    # "bomination_ocr_" temp dirs so cleanup leaves it alone.
+    cached = False
     if output_path is None:
-        # Create a temporary file for OCR'd PDF
-        temp_dir = tempfile.mkdtemp(prefix="bomination_ocr_")
-        output_path = Path(temp_dir) / f"{pdf_path.stem}_ocr.pdf"
+        try:
+            digest = hashlib.md5(pdf_path.read_bytes()).hexdigest()[:12]
+            cache_dir = Path(tempfile.gettempdir()) / "bomination_cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            output_path = cache_dir / f"{pdf_path.stem}_{digest}_ocr.pdf"
+            if output_path.exists() and output_path.stat().st_size > 0:
+                logger.info(f"[OK] Reusing cached OCR result: {output_path}")
+                return True, str(output_path), None
+            cached = True
+        except Exception as e:
+            logger.warning(f"[WARNING] OCR cache unavailable ({e}) — using temp dir")
+            temp_dir = tempfile.mkdtemp(prefix="bomination_ocr_")
+            output_path = Path(temp_dir) / f"{pdf_path.stem}_ocr.pdf"
     else:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -482,10 +497,14 @@ def preprocess_pdf_with_ocr(pdf_path, output_path=None, force_ocr=False):
             skip_text=False,      # Don't skip existing text
             redo_ocr=False,       # Don't redo OCR if already done
             language='eng',       # English language for OCR
-            oversample=600,       # Rasterize at 600 DPI instead of 400 for better table lines
-            image_dpi=600,        # Ensure embedded images use 600 DPI
+            # 400 DPI, not 600. Tesseract peaks around 300-400; 600 more than
+            # doubles the pixel count (and the runtime) for no accuracy gain, and
+            # OCRmyPDF flags it as a cause of transcoding. Raise it back if OCR
+            # quality on a given drawing turns out to be marginal.
+            oversample=400,
             progress_bar=False    # Disable progress bar for cleaner output
-        )                         # NOTE: no `quiet=` — dropped in OCRmyPDF 17
+        )                         # NOTE: no `quiet=`  — dropped in OCRmyPDF 17
+                                  # NOTE: no `image_dpi=` — ignored for PDF input
         
         if output_path.exists():
             logger.info(f"[OK] OCR preprocessing completed successfully")
@@ -521,7 +540,13 @@ def cleanup_ocr_temp_files(ocr_pdf_path):
         
     try:
         ocr_path = Path(ocr_pdf_path)
-        
+
+        # Never delete cached results — the cache exists precisely so a repeat
+        # run can skip OCR entirely.
+        if "bomination_cache" in str(ocr_path.parent):
+            logger.info(f"[INFO] Keeping cached OCR result: {ocr_path}")
+            return
+
         # If it's in a temp directory we created, remove the entire directory
         if "bomination_ocr_" in str(ocr_path.parent):
             temp_dir = ocr_path.parent
